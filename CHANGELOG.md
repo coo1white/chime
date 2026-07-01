@@ -5,6 +5,24 @@ one capability per step, slow and steady.
 
 ## Unreleased
 
+The handoff ledger — Chime ⇄ Claude Code interop.
+
+- **Capability**: `handoff` gives Chime and Claude Code a shared channel to review
+  each other and pass work back and forth. `propose` records a structured change
+  proposal (Chime stays read-only on code — it proposes; Claude Code turns an
+  accepted proposal into a real PR). `review` records a verdict (approve /
+  request-changes / comment) about a proposal id or an external PR ref, advancing
+  the targeted proposal's status. `list` shows what's open. Entries carry a `to`
+  field so proposals flow either direction — mutual review, common progress.
+- **Implementation**: one `src/tools/handoff.ts` + one registry row. A JSON ledger
+  at `~/.chime/handoff/ledger.json` — Chime's own data, so appending never touches
+  the user's project code. Parsing, id allocation, and verdict→status are pure
+  functions; the ledger fails soft (a junk file reads as empty).
+- **Tests**: 13 offline tests — pure helpers, propose/review round-trip (a verdict
+  advances its proposal), list filters, bidirectional `to`, and fail-closed paths.
+- **Risk**: low — writes only under `~/.chime`; fails closed and never mutates the
+  user's repos.
+
 The doctor — a universal project health score.
 
 - **Capability**: `project_doctor` diagnoses a whole project and reports a 0–100

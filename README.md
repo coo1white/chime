@@ -68,6 +68,7 @@ never goes stale. Four read-only tools work over it:
 | `project_doctor` | "how healthy is X?", "diagnose X", "score all my projects" | auto-detects the toolchain and scores the repo 0–100 (A–F) from read-only health probes, worst-first, each with a fix command |
 | `project_health` | "is my app up?" | curls the deployed health URL, reports the HTTP code |
 | `memory` | "remember X about this repo", "what did we do last time?" | read/append a per-project notebook under `~/.chime/memory` |
+| `handoff` | "propose X to Claude", "review proposal P1", "what's open?" | read/append the shared Chime⇄Claude ledger under `~/.chime/handoff` |
 
 ```
 chime> list my projects
@@ -110,6 +111,31 @@ It also **grows with you**: the `memory` tool keeps a per-project notebook under
 `~/.chime/memory/<name>.md` (Verified Facts / Failed Attempts / Last Session / Next Run,
 the same shape the repos use in `PROJECT_MEMORY.md`), so Chime recalls a project's state
 between sessions.
+
+### The handoff ledger — Chime ⇄ Claude Code
+
+`handoff` is a **shared review channel** so Chime and Claude Code can review each
+other and pass work back and forth. It is Chime's own data (a JSON ledger under
+`~/.chime/handoff/ledger.json`) that both sides read and append — so the data is
+genuinely shared, while Chime stays **read-only on your project code**. Two verbs:
+
+- **`propose`** — Chime records a structured change proposal (title, rationale,
+  target files, suggested branch) instead of editing code. Claude Code picks up an
+  accepted proposal and turns it into a **real PR**.
+- **`review`** — either side records a verdict (`approve` / `request-changes` /
+  `comment`) about a proposal id or an external PR ref. When it targets a proposal
+  in the ledger, that proposal's status advances (→ accepted / changes-requested).
+
+`list` shows what's open. Entries carry a `to` field, so proposals can flow either
+direction (`chime → claude` or `claude → chime`). The loop: *Chime proposes → Claude
+reviews & opens a PR → Claude proposes → Chime reviews* — mutual review, common
+progress, neither one mutating the other's code.
+
+```
+chime> propose to Claude: add a CI-wired probe to project_doctor
+chime> review P1 approve
+chime> what handoffs are open?
+```
 
 ## Model routing
 
