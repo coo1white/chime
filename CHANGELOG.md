@@ -5,6 +5,20 @@ one capability per step, slow and steady.
 
 ## Unreleased
 
+`project_doctor` — a CI probe.
+
+- **Probe**: `project_doctor` now warns when a repo has no continuous-integration
+  config, `ok` when it does. GitHub Actions is detected by listing `.github/workflows/`
+  directly (a `.github/` holding only issue templates does not count); other systems
+  are matched by a root marker (`.gitlab-ci.yml`, `.circleci`, `Jenkinsfile`, Travis,
+  Azure, Bitbucket, Drone, Buildkite, Cirrus). Read-only, one nested `readdirSync`.
+- **Provenance**: this probe was produced by the multi-agent handoff loop — proposed
+  to the panel, approved 3–1 (claude/codex/gemini approve, deepseek requested changes),
+  with deepseek's rigor (nested detection, the non-GitHub marker matrix) folded into
+  the accepted implementation.
+- **Tests**: +3 (root marker satisfies; no-CI warns; nested `.github/workflows/`
+  present vs templates-only) → 20 doctor tests; full suite green.
+
 The handoff ledger — multi-agent, cross-platform collaboration.
 
 - **Capability**: `handoff` is a shared, vendor-neutral channel where any agents

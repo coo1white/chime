@@ -95,6 +95,33 @@ function git(ctx: HandlerContext, path: string, args: string[]): { ok: boolean; 
 // Directories that should never be committed — build output and vendored deps.
 const ARTIFACT_PATHS = ["node_modules", "dist", "build", "out", "target", ".next", "coverage"];
 
+// Root-level markers for non-GitHub CI systems. A file OR directory match counts
+// as CI-present (e.g. `.circleci/` is a dir, `Jenkinsfile` is a file).
+const CI_ROOT_MARKERS = [
+  ".gitlab-ci.yml",
+  ".circleci",
+  "Jenkinsfile",
+  ".travis.yml",
+  "azure-pipelines.yml",
+  "bitbucket-pipelines.yml",
+  ".drone.yml",
+  ".buildkite",
+  ".cirrus.yml",
+];
+
+// Guarded, read-only: is there at least one workflow file under .github/workflows/?
+// GitHub Actions lives one level down, where the root `files` set can't see it, so
+// we list that dir directly. A missing/empty dir -> false; never throws. (This
+// nested check avoids the false-positive of treating a `.github/` that holds only
+// issue templates or dependabot config as "CI present".)
+function hasGithubWorkflow(path: string): boolean {
+  try {
+    return readdirSync(`${path}/.github/workflows`).some((f) => /\.ya?ml$/i.test(f));
+  } catch {
+    return false;
+  }
+}
+
 // Collect every finding for one project. Git-dependent probes short-circuit to a
 // single "not a repo" fail when there is no .git, so we never shell out blindly.
 export function probe(p: Project, ctx: HandlerContext, files: Set<string>, path: string): Finding[] {
@@ -189,6 +216,16 @@ export function probe(p: Project, ctx: HandlerContext, files: Set<string>, path:
       : { id: "check-wired", severity: "warn", title: "no fast check gate", fix: "add a `check` command to this project's registry row" },
   );
 
+  // 9. Continuous integration — a repo with no CI config has no automated gate.
+  //    GitHub Actions lives in a nested dir the root `files` set can't see, so we
+  //    list .github/workflows/ directly; other systems drop a root marker.
+  const hasCi = hasGithubWorkflow(path) || CI_ROOT_MARKERS.some((m) => files.has(m));
+  findings.push(
+    hasCi
+      ? { id: "ci", severity: "ok", title: "has CI configured" }
+      : { id: "ci", severity: "warn", title: "no CI configured", fix: "add a .github/workflows/ci.yml running your check command" },
+  );
+
   return findings;
 }
 
@@ -265,7 +302,7 @@ function handler(input: Record<string, unknown>, ctx: HandlerContext): ToolResul
 export const projectDoctor: Capability = {
   name: "project_doctor",
   description:
-    "Run a whole-project health diagnosis and report a 0-100 score with a letter grade and prioritized, actionable findings. Auto-detects the toolchain (Node, Rust, Python, Go, Ruby) and runs read-only probes: git hygiene (repo? clean? in sync? stale?), dependency pinning (lockfile present?), housekeeping (README, .gitignore, license), committed build artifacts, and whether a fast check gate is wired. Call this when the user asks 'how healthy is X', 'diagnose X', 'what's wrong with X', or 'score all my projects' (pass 'all' for a leaderboard). Strictly read-only: it runs git status/log/ls-files and reads directory listings; every fix is returned as a next-step command, never run.",
+    "Run a whole-project health diagnosis and report a 0-100 score with a letter grade and prioritized, actionable findings. Auto-detects the toolchain (Node, Rust, Python, Go, Ruby) and runs read-only probes: git hygiene (repo? clean? in sync? stale?), dependency pinning (lockfile present?), housekeeping (README, .gitignore, license), committed build artifacts, whether a fast check gate is wired, and whether continuous integration is configured (GitHub Actions or an equivalent like GitLab CI / CircleCI). Call this when the user asks 'how healthy is X', 'diagnose X', 'what's wrong with X', or 'score all my projects' (pass 'all' for a leaderboard). Strictly read-only: it runs git status/log/ls-files and reads directory listings; every fix is returned as a next-step command, never run.",
   inputSchema,
   handler,
 };
