@@ -74,7 +74,7 @@ test("detectToolchain: recognizes Node, Rust, Go; unknown otherwise", () => {
 // --- probes drive findings --------------------------------------------------
 
 test("probe: a pristine node repo yields only ok findings", () => {
-  const files = new Set(["package.json", "package-lock.json", "README.md", ".gitignore", "LICENSE"]);
+  const files = new Set(["package.json", "package-lock.json", "README.md", ".gitignore", "LICENSE", ".gitlab-ci.yml"]);
   const ctx = gitCtx("/home", {
     "rev-parse": { status: 0, stdout: "true", stderr: "" },
     status: { status: 0, stdout: "", stderr: "" },
@@ -199,6 +199,38 @@ test("diagnose: reads a real directory, sorts findings worst-first, returns a sc
     const findings = r.findings as Finding[];
     assert.equal(findings[0]!.severity, "fail", "worst finding (not a repo) is first");
     assert.ok((r.nextSteps as string[]).length > 0, "actionable next steps returned");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("probe: a root CI marker (.gitlab-ci.yml) satisfies the CI probe", () => {
+  const ctx = gitCtx("/home", { "rev-parse": { status: 128, stdout: "", stderr: "x" } });
+  const ci = probe(base, ctx, new Set([".gitlab-ci.yml"]), "/home/Developer/demo").find((f) => f.id === "ci")!;
+  assert.equal(ci.severity, "ok");
+});
+
+test("probe: no CI config anywhere warns with an actionable fix", () => {
+  const ctx = gitCtx("/home", { "rev-parse": { status: 128, stdout: "", stderr: "x" } });
+  const ci = probe(base, ctx, new Set(["package.json"]), "/home/Developer/demo").find((f) => f.id === "ci")!;
+  assert.equal(ci.severity, "warn");
+  assert.match(ci.fix ?? "", /\.github\/workflows/);
+});
+
+test("probe: a .github/ with real workflows is CI-present; templates-only is not (nested, read-only)", () => {
+  const home = mkdtempSync(join(tmpdir(), "chime-ci-"));
+  try {
+    const ctx = gitCtx(home, { "rev-parse": { status: 128, stdout: "", stderr: "x" } });
+    // .github exists but holds only an issue template -> still "no CI"
+    mkdirSync(join(home, "tmpl", ".github", "ISSUE_TEMPLATE"), { recursive: true });
+    writeFileSync(join(home, "tmpl", ".github", "ISSUE_TEMPLATE", "bug.md"), "x");
+    let ci = probe(base, ctx, new Set([".github"]), join(home, "tmpl")).find((f) => f.id === "ci")!;
+    assert.equal(ci.severity, "warn", ".github without workflows is not CI");
+    // a real workflow file under .github/workflows/ -> CI present
+    mkdirSync(join(home, "real", ".github", "workflows"), { recursive: true });
+    writeFileSync(join(home, "real", ".github", "workflows", "ci.yml"), "name: ci");
+    ci = probe(base, ctx, new Set([".github"]), join(home, "real")).find((f) => f.id === "ci")!;
+    assert.equal(ci.severity, "ok", "a workflow file means CI is configured");
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
