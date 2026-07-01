@@ -70,6 +70,7 @@ never goes stale. Four read-only tools work over it:
 | `project_health` | "is my app up?" | curls the deployed health URL, reports the HTTP code |
 | `memory` | "remember X about this repo", "what did we do last time?" | read/append a per-project notebook under `~/.chime/memory` |
 | `handoff` | "propose X to codex", "review P1 as gemini", "status of P1", "what's open?" | read/append the shared multi-agent ledger under `~/.chime/handoff` |
+| `ledger` | "verify this proposal from cool-workflow", "check my handoff inbox", "propose X to cw", "review ldg-… approved" | verify or mint `cw ledger`-compatible, sha256-sealed handoff entries — fail-closed |
 
 ```
 chime> list my projects
@@ -144,6 +145,32 @@ chime> review P1 approve as gemini
 chime> status of P1          # -> panel: claude+gemini approve, deepseek blocks -> accepted
 chime> what handoffs are open?
 ```
+
+### The cross-agent ledger — interop with `cw ledger`
+
+The `ledger` tool lets Chime hand off with [cool-workflow](https://github.com/coo1white/cool-workflow)'s
+`cw ledger` — a *different* channel from the local `handoff` board above. Where
+`handoff` is Chime's own consensus board, `ledger` speaks cw's **exact** wire
+format so two agents scoped to two separate repos exchange **verifiable** entries,
+not chat. Each entry is a self-contained JSON object carrying its own **sha256
+content digest** and a content-addressed `ldg-<hex>` id; the receiving side runs
+`verify` **fail-closed** before acting, so a tampered or malformed entry is refused
+and `verify && open-pr` can never proceed on a lie.
+
+```
+chime> verify this proposal from cool-workflow   (paste it, or give a file path)
+chime> check my handoff inbox at ~/handoff-repo/ledger
+chime> propose to cool-workflow: add retry to the fetch path
+chime> review ldg-6fd2a38a8a1d2b8c approved — tests pass, scope ok
+```
+
+Chime is the "chime" side of cw's documented round-trip — *cw proposes → chime
+verifies → chime reviews → cw verifies*. The digest kernel ([`src/ledger.ts`](src/ledger.ts))
+is a byte-for-byte port of cw's, checked by tests against entries produced by cw's
+own kernel, so an entry sealed on one side always verifies on the other. Like the
+rest of the secretary it is **read-only**: `verify`/`list` only read, and
+`propose`/`review` only return a sealed entry for you to relay — Chime writes
+nothing and mutates no repo.
 
 ## Model routing
 

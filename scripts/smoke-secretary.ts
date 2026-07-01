@@ -40,7 +40,18 @@ const scored = board.projects as { name: string; score?: number; grade?: string 
 assert(scored.length === rows.length, "one doctor card per project");
 process.stdout.write(`smoke-secretary: project_doctor/all -> ${scored.length} graded cards\n`);
 
-// 4) an unknown tool still fails closed (dispatch never throws).
+// 4) ledger — mint a sealed proposal, then verify it fail-closed, all through
+// dispatch. Proves the cw-interop tool is wired end-to-end with no network.
+const minted = await call("ledger", { action: "propose", title: "smoke", rationale: "wire check", files: ["src/x.ts"] });
+assert(minted.ok === true, "ledger/propose ok");
+const sealed = minted.entry as Record<string, unknown>;
+const verified = await call("ledger", { action: "verify", entry: sealed });
+assert(verified.ok === true && verified.verified === true, "ledger/verify accepts its own sealed entry");
+const tamper = await call("ledger", { action: "verify", entry: { ...sealed, title: "tampered" } });
+assert(tamper.ok === true && tamper.verified === false, "ledger/verify refuses a tampered entry");
+process.stdout.write(`smoke-secretary: ledger -> minted ${String(minted.id)}, verify accept+refuse ok\n`);
+
+// 5) an unknown tool still fails closed (dispatch never throws).
 const bad = await call("no_such_tool", {});
 assert(bad.ok === false, "unknown tool fails closed");
 

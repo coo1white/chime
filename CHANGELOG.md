@@ -3,7 +3,35 @@
 All notable changes to Chime are noted here. Versions are small on purpose —
 one capability per step, slow and steady.
 
-## Unreleased
+## 0.0.3
+
+Cross-agent ledger — Chime interoperates with cool-workflow's `cw ledger`.
+
+- **Capability**: a new `ledger` tool speaks cool-workflow's exact cross-agent
+  handoff format, so the two agents hand each other a change **proposal** or a
+  review **verdict** as VERIFIABLE data, not chat. Each entry is a self-contained
+  JSON object carrying its own sha256 content digest and a content-addressed
+  `ldg-<hex>` id. `verify` checks one entry **fail-closed** before acting (a
+  tampered or malformed entry is refused); `list` verifies a whole ledger
+  directory — a shared handoff repo's working tree — as an inbox (and
+  union-verifies mirror `dirs`); `propose` / `review` mint a sealed entry to relay
+  back. This makes Chime the "chime" side of cw's documented round-trip:
+  *cw proposes → chime verifies → chime reviews → cw verifies*.
+- **Interop is proven, not assumed**: `src/ledger.ts` is a byte-for-byte port of
+  cool-workflow's kernel (`stableStringify` → sha256 → `ldg-` id). The tests carry
+  two entries produced by cw's OWN compiled kernel and assert Chime both
+  **verifies** them and **reproduces their exact id + digest** — if the two
+  serializations ever drift, a test goes red. `schemaVersion` is the lockstep
+  contract if the shape must change.
+- **Read-only**: `verify`/`list` only read (an entry, or a directory);
+  `propose`/`review` only build a sealed entry and return it — Chime writes
+  nothing and mutates no repo. Distinct from Chime's local `handoff` consensus
+  board (same split cw keeps between `cw handoff` and `cw ledger`).
+- **Implementation**: one `src/ledger.ts` kernel (pure, zero-dep) + one
+  `src/tools/ledger.ts` + one registry row. **Tests**: +18 offline
+  (digest determinism, every fail-closed code, id-binding, dir/mirror-union, the
+  tool round-trip, and the genuine cw fixtures) → 142 suite total, green.
+- **Risk**: low — read-only, fails closed, no network.
 
 Pin the backend to your saved login (privacy lock).
 
