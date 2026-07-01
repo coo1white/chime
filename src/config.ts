@@ -21,10 +21,14 @@ export interface Config {
 }
 
 // What `chime login` writes to ~/.chime/config.json — a saved backend + Vertex coords.
+// `handoffDir` is an optional convenience: the default shared ledger directory the
+// `ledger list` tool reads when no `dir` is given (so "check my handoff inbox" needs
+// no path). It is user data, kept in this private, gitignored file.
 export interface ChimeFileConfig {
   backend?: Backend;
   project?: string;
   location?: string;
+  handoffDir?: string;
 }
 
 export function chimeConfigPath(home: string): string {
@@ -41,6 +45,7 @@ export function readChimeConfig(home: string): ChimeFileConfig {
     if (d.backend === "anthropic" || d.backend === "gemini" || d.backend === "vertex") out.backend = d.backend;
     if (typeof d.project === "string") out.project = d.project;
     if (typeof d.location === "string") out.location = d.location;
+    if (typeof d.handoffDir === "string" && d.handoffDir.trim()) out.handoffDir = d.handoffDir.trim();
     return out;
   } catch {
     return {};

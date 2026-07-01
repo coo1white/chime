@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import type { Capability, HandlerContext, JsonSchema, ToolResultPayload } from "../types.ts";
+import { readChimeConfig } from "../config.ts";
 import {
   buildLedgerProposal,
   buildLedgerReview,
@@ -38,7 +39,7 @@ const inputSchema: JsonSchema = {
       description: "verify: the ledger entry to check — a JSON object or a JSON string (use this OR `file`)",
     },
     file: { type: "string", description: "verify: a path to a ledger entry JSON file to read and check" },
-    dir: { type: "string", description: "list: a ledger directory (the working tree of a shared handoff repo) to verify" },
+    dir: { type: "string", description: "list: a ledger directory (the working tree of a shared handoff repo) to verify. Optional — if omitted, list falls back to CHIME_HANDOFF_DIR or `handoffDir` in ~/.chime/config.json" },
     dirs: {
       type: "array",
       items: { type: "string" },
@@ -110,12 +111,36 @@ function handler(input: Record<string, unknown>, ctx: HandlerContext): ToolResul
     const single = String(input.dir ?? "").trim();
     if (dirs.length > 1) {
       const union = unionLedgerEntries(dirs);
-      return { ok: true, action, ...union };
+      return { ok: true, action, source: "arg", ...union };
     }
-    const dir = single || dirs[0] || "";
-    if (!dir) return { ok: false, action, error: "list needs `dir` (a ledger directory) or `dirs` (mirror directories)" };
+    // No explicit dir? Fall back to a configured default inbox, so "check my
+    // handoff inbox" needs no path: CHIME_HANDOFF_DIR (env) wins over the saved
+    // `handoffDir` in ~/.chime/config.json (matches Chime's env-over-file rule).
+    // The config file is read only when neither an arg nor the env resolves it.
+    // Both `dir` and `dirs[0]` are trimmed the same way, so a blank of either
+    // falls through to env/config instead of taking a spurious "arg" path.
+    const argDir = single || String(dirs[0] ?? "").trim();
+    const envDir = String(ctx.env.CHIME_HANDOFF_DIR ?? "").trim();
+    let dir = argDir || envDir;
+    let source: "arg" | "env" | "config" = argDir ? "arg" : "env";
+    if (!dir) {
+      const cfgDir = readChimeConfig(ctx.home).handoffDir ?? "";
+      if (cfgDir) {
+        dir = cfgDir;
+        source = "config";
+      }
+    }
+    if (!dir) {
+      return {
+        ok: false,
+        action,
+        error:
+          "list needs `dir` (a ledger directory) or `dirs` (mirror directories). " +
+          "Or set a default inbox: CHIME_HANDOFF_DIR, or `handoffDir` in ~/.chime/config.json.",
+      };
+    }
     const result = listLedgerEntries(dir);
-    return { ok: true, action, ...result };
+    return { ok: true, action, source, ...result };
   }
 
   if (action === "propose") {
@@ -159,7 +184,7 @@ function handler(input: Record<string, unknown>, ctx: HandlerContext): ToolResul
 export const ledger: Capability = {
   name: "ledger",
   description:
-    "The cross-agent handoff ledger — how Chime interoperates with cool-workflow's `cw ledger`: two agents scoped to two repos hand each other a change PROPOSAL or a review VERDICT as VERIFIABLE data (a self-contained JSON entry with a sha256 content digest and a content-addressed ldg-… id), not chat. action=verify checks one entry FAIL-CLOSED before acting (from `entry` inline or a `file` path); a tampered or malformed entry is refused (verified:false). action=list verifies a whole ledger `dir` (a shared handoff repo's working tree) as an inbox, or union-verifies mirror `dirs`; allOk is false if ANY entry fails. action=propose mints a sealed proposal (from/to/title/rationale/files/diff). action=review mints a sealed verdict (target + approved|rejected + findings). Strictly read-only on your project code: verify/list only read, propose/review only return a sealed entry for you to relay. (Distinct from Chime's local `handoff` consensus board.)",
+    "The cross-agent handoff ledger — how Chime interoperates with cool-workflow's `cw ledger`: two agents scoped to two repos hand each other a change PROPOSAL or a review VERDICT as VERIFIABLE data (a self-contained JSON entry with a sha256 content digest and a content-addressed ldg-… id), not chat. action=verify checks one entry FAIL-CLOSED before acting (from `entry` inline or a `file` path); a tampered or malformed entry is refused (verified:false). action=list verifies a whole ledger `dir` (a shared handoff repo's working tree) as an inbox, or union-verifies mirror `dirs`; allOk is false if ANY entry fails. `dir` is optional — with none given, list reads the configured default inbox (CHIME_HANDOFF_DIR, else `handoffDir` in ~/.chime/config.json), and reports `source` (arg|env|config) so it is clear which was used. action=propose mints a sealed proposal (from/to/title/rationale/files/diff). action=review mints a sealed verdict (target + approved|rejected + findings). Strictly read-only on your project code: verify/list only read, propose/review only return a sealed entry for you to relay. (Distinct from Chime's local `handoff` consensus board.)",
   inputSchema,
   handler,
 };

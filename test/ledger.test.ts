@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -258,6 +258,85 @@ test("tool list: single dir and mirror union through the handler", async () => {
   assert.equal(union.allOk, true);
   assert.equal(union.count, 1);
   assert.deepEqual((union.dirs as string[]).sort(), [a, b].sort());
+});
+
+// A ctx with a custom env (the shared `ctx()` helper hard-codes env:{}).
+function ctxEnv(env: Record<string, string | undefined>, home = tempDir()): HandlerContext {
+  return {
+    runCommand: () => {
+      throw new Error("ledger tool must not shell out");
+    },
+    env,
+    now: () => new Date(WHEN),
+    home,
+  };
+}
+function writeConfig(home: string, cfg: Record<string, unknown>): void {
+  mkdirSync(join(home, ".chime"), { recursive: true });
+  writeFileSync(join(home, ".chime", "config.json"), JSON.stringify(cfg));
+}
+
+test("tool list: no dir falls back to CHIME_HANDOFF_DIR (source=env)", async () => {
+  const d = tempDir();
+  writeEntry(d, CW_PROPOSAL);
+  const res = await call({ action: "list" }, ctxEnv({ CHIME_HANDOFF_DIR: d }));
+  assert.equal(res.ok, true);
+  assert.equal(res.source, "env");
+  assert.equal(res.dir, d);
+  assert.equal(res.allOk, true);
+  assert.equal(res.count, 1);
+});
+
+test("tool list: no dir falls back to ~/.chime/config.json handoffDir (source=config)", async () => {
+  const d = tempDir();
+  writeEntry(d, CW_PROPOSAL);
+  const home = tempDir();
+  writeConfig(home, { handoffDir: d });
+  const res = await call({ action: "list" }, ctx(home));
+  assert.equal(res.ok, true);
+  assert.equal(res.source, "config");
+  assert.equal(res.dir, d);
+  assert.equal(res.count, 1);
+});
+
+test("tool list: an explicit dir wins over env/config (source=arg)", async () => {
+  const argD = tempDir();
+  writeEntry(argD, CW_PROPOSAL);
+  const envD = tempDir(); // empty — must NOT be read
+  const res = await call({ action: "list", dir: argD }, ctxEnv({ CHIME_HANDOFF_DIR: envD }));
+  assert.equal(res.source, "arg");
+  assert.equal(res.dir, argD);
+  assert.equal(res.count, 1);
+});
+
+test("tool list: env CHIME_HANDOFF_DIR wins over config handoffDir", async () => {
+  const envD = tempDir();
+  writeEntry(envD, CW_PROPOSAL);
+  const cfgD = tempDir(); // different, empty
+  const home = tempDir();
+  writeConfig(home, { handoffDir: cfgD });
+  const res = await call({ action: "list" }, ctxEnv({ CHIME_HANDOFF_DIR: envD }, home));
+  assert.equal(res.source, "env");
+  assert.equal(res.dir, envD);
+});
+
+test("tool list: no dir and nothing configured fails closed with a helpful error", async () => {
+  const res = await call({ action: "list" }, ctx()); // temp home, no config, empty env
+  assert.equal(res.ok, false);
+  assert.match(String(res.error), /CHIME_HANDOFF_DIR|handoffDir/);
+});
+
+test("tool list: a whitespace-only dirs[0] falls through to config, same as a whitespace dir", async () => {
+  const d = tempDir();
+  writeEntry(d, CW_PROPOSAL);
+  const home = tempDir();
+  writeConfig(home, { handoffDir: d });
+  const viaDirs = await call({ action: "list", dirs: ["  "] }, ctx(home));
+  const viaDir = await call({ action: "list", dir: "  " }, ctx(home));
+  assert.equal(viaDirs.source, "config");
+  assert.equal(viaDirs.ok, true);
+  assert.equal(viaDirs.count, 1);
+  assert.deepEqual(viaDirs, viaDir);
 });
 
 test("tool: bad input fails closed (dispatch marks is_error)", async () => {

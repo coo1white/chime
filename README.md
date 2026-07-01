@@ -159,10 +159,16 @@ and `verify && open-pr` can never proceed on a lie.
 
 ```
 chime> verify this proposal from cool-workflow   (paste it, or give a file path)
+chime> check my handoff inbox                     (uses your configured default dir)
 chime> check my handoff inbox at ~/handoff-repo/ledger
 chime> propose to cool-workflow: add retry to the fetch path
 chime> review ldg-6fd2a38a8a1d2b8c approved — tests pass, scope ok
 ```
+
+`list` takes a `dir`, but with none given it reads your **default inbox**:
+`CHIME_HANDOFF_DIR` if set, else `handoffDir` in `~/.chime/config.json` — so "check
+my handoff inbox" needs no path. The result reports `source` (`arg`/`env`/`config`)
+so it is always clear which directory was read.
 
 Chime is the "chime" side of cw's documented round-trip — *cw proposes → chime
 verifies → chime reviews → cw verifies*. The digest kernel ([`src/ledger.ts`](src/ledger.ts))
@@ -198,6 +204,7 @@ Turn routing off with `CHIME_ROUTER=0` (then it always uses the balanced model).
 | `CHIME_MODEL` | per-backend | the balanced/default model (gemini `gemini-2.5-flash` / claude `claude-sonnet-5`) |
 | `CHIME_MAX_TOKENS` | `2048` | max reply tokens |
 | `CHIME_MAX_ITERATIONS` | `8` | tool-call rounds per turn (loop guard) |
+| `CHIME_HANDOFF_DIR` | from `~/.chime/config.json` `handoffDir` | default shared ledger dir for `ledger list` when no `dir` is given |
 
 Default tiers — gemini: `gemini-2.5-flash-lite` / `gemini-2.5-flash` / `gemini-2.5-pro`;
 claude: `claude-haiku-4-5` / `claude-sonnet-5` / `claude-opus-4-8`.

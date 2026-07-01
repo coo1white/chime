@@ -1,6 +1,6 @@
 {
   "name": "chime",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "private": true,
   "description": "Chime — a personal terminal conversational assistant (zero runtime deps).",
   "license": "MIT",

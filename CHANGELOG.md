@@ -3,6 +3,28 @@
 All notable changes to Chime are noted here. Versions are small on purpose —
 one capability per step, slow and steady.
 
+## 0.0.4
+
+`ledger list` finds your inbox — a configured default directory.
+
+- **Capability**: `ledger list` no longer needs a path every time. With no `dir`
+  given it reads your **default inbox**: `CHIME_HANDOFF_DIR` if set, else
+  `handoffDir` in `~/.chime/config.json` (env-over-file, the same rule Chime uses
+  everywhere). So "check my handoff inbox" just works once the shared handoff repo
+  is set once. An explicit `dir`/`dirs` still wins, and the result reports `source`
+  (`arg`/`env`/`config`) so it is always clear which directory was read.
+- **Implementation**: one optional `handoffDir` field on `ChimeFileConfig` (parsed
+  fail-soft in `readChimeConfig`, trimmed, ignored unless a non-empty string) + a
+  small fallback in the `ledger` tool's `list` action. No new dependency; the path
+  is private user data in the gitignored `~/.chime/config.json`. Still strictly
+  read-only.
+- **Tests**: +6 offline — fallback to env, fallback to config, an explicit dir
+  wins, env wins over config, the nothing-configured case fails closed with a
+  helpful error, and a whitespace-only `dirs[0]` falls through to config the same
+  as a whitespace `dir` (an adversarial review caught the trim asymmetry) → 148
+  suite total, green.
+- **Risk**: low — read-only, fails closed, no network.
+
 ## 0.0.3
 
 Cross-agent ledger — Chime interoperates with cool-workflow's `cw ledger`.
