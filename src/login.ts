@@ -1,18 +1,45 @@
 import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { writeChimeConfig } from "./config.ts";
+import { tokenFrom, type GcloudRunner } from "./vertex.ts";
 
-// `chime login`: run the Google browser popup (gcloud Application Default
-// Credentials), then save the Vertex project + location to ~/.chime/config.json so
-// later runs need no key and no env. After this, `chime` just works.
+// `chime login`: get Chime onto Vertex AI with as little friction as possible.
+// If a gcloud credential already works (ADC or a plain `gcloud auth login`), reuse
+// it — no browser. Only sign in when there is no working token. Either way, save
+// the project + location to ~/.chime/config.json so later runs need nothing.
 
-function run(cmd: string, args: string[], inherit = false): { ok: boolean; out: string; err: string } {
-  const r = spawnSync(cmd, args, { encoding: "utf8", stdio: inherit ? "inherit" : "pipe" });
-  return { ok: r.status === 0 && !r.error, out: (r.stdout ?? "").trim(), err: (r.stderr ?? r.error?.message ?? "").trim() };
-}
+const runner: GcloudRunner = (args) => {
+  const r = spawnSync("gcloud", args, { encoding: "utf8" });
+  return { status: r.status, stdout: r.stdout ?? "" };
+};
 
 function haveGcloud(): boolean {
-  return run("gcloud", ["--version"]).ok;
+  return runner(["--version"]).status === 0;
+}
+
+function resolveProject(env: Record<string, string | undefined>): string {
+  if (env.CHIME_VERTEX_PROJECT) return env.CHIME_VERTEX_PROJECT;
+  const p = runner(["config", "get-value", "project"]);
+  const out = p.stdout.trim();
+  return p.status === 0 && out && out !== "(unset)" ? out : "";
+}
+
+function save(env: Record<string, string | undefined>, home: string): number {
+  const project = resolveProject(env);
+  if (!project) {
+    process.stderr.write(
+      "chime login: signed in, but no project is set. Set one and re-run:\n" +
+        "  gcloud config set project YOUR_PROJECT   (or)   CHIME_VERTEX_PROJECT=... chime login\n",
+    );
+    return 1;
+  }
+  const location = env.CHIME_VERTEX_LOCATION || "us-central1";
+  writeChimeConfig(home, { backend: "vertex", project, location });
+  process.stdout.write(
+    `chime login: ready. backend=vertex project=${project} location=${location}\n` +
+      "Run `chime`. (Make sure the Vertex AI API is enabled: gcloud services enable aiplatform.googleapis.com)\n",
+  );
+  return 0;
 }
 
 export async function runLogin(
@@ -27,33 +54,24 @@ export async function runLogin(
     return 1;
   }
 
-  process.stdout.write("chime login: opening the Google sign-in in your browser...\n");
-  // Interactive: opens the browser popup and stores Application Default Credentials.
-  const login = run("gcloud", ["auth", "application-default", "login"], true);
-  if (!login.ok) {
-    process.stderr.write("chime login: gcloud auth did not finish. Nothing was saved.\n");
-    return 1;
+  // Already have a working credential? Reuse it — no browser.
+  if (tokenFrom(runner)) {
+    process.stdout.write("chime login: found a working gcloud credential — no sign-in needed.\n");
+    return save(env, home);
   }
 
-  // Resolve the project: env wins, else the active gcloud project.
-  let project = env.CHIME_VERTEX_PROJECT || "";
-  if (!project) {
-    const p = run("gcloud", ["config", "get-value", "project"]);
-    if (p.ok && p.out && p.out !== "(unset)") project = p.out;
-  }
-  if (!project) {
+  process.stdout.write("chime login: no credential yet — opening the Google sign-in...\n");
+  spawnSync("gcloud", ["auth", "application-default", "login"], { stdio: "inherit" });
+
+  if (!tokenFrom(runner)) {
     process.stderr.write(
-      "chime login: signed in, but no project is set. Set one and re-run:\n" +
-        "  gcloud config set project YOUR_PROJECT   (or)   CHIME_VERTEX_PROJECT=YOUR_PROJECT chime login\n",
+      "chime login: still no working token — nothing saved.\n" +
+        "  • On the consent page, check EVERY box (esp. \"...Google Cloud data\").\n" +
+        "  • Or try the plain user login instead:  gcloud auth login\n" +
+        "  • Workspace domains can block this scope; an admin may need to allow it,\n" +
+        "    or use a personal Google account for the login.\n",
     );
     return 1;
   }
-  const location = env.CHIME_VERTEX_LOCATION || "us-central1";
-
-  writeChimeConfig(home, { backend: "vertex", project, location });
-  process.stdout.write(
-    `chime login: saved. backend=vertex project=${project} location=${location}\n` +
-      "You can now just run `chime` — no key needed. (Make sure the Vertex AI API is enabled for the project.)\n",
-  );
-  return 0;
+  return save(env, home);
 }

@@ -23,13 +23,32 @@ export interface VertexTransportOptions {
 // ADC access tokens last ~1h; refresh a little early.
 const TOKEN_TTL_MS = 50 * 60 * 1000;
 
-function gcloudToken(): string {
-  const r = spawnSync("gcloud", ["auth", "application-default", "print-access-token"], { encoding: "utf8" });
-  if (r.status !== 0 || !r.stdout.trim()) {
-    const why = (r.stderr || r.error?.message || "no token").trim();
-    throw new ApiError(0, `gcloud token failed: ${why}. Run: chime login`);
+export type GcloudRunner = (args: string[]) => { status: number | null; stdout: string };
+
+// The two ways gcloud mints a cloud-platform token: Application Default
+// Credentials first, then the plain user login. First one that works wins, so
+// whichever the user has set up is reused — no forced re-login.
+export function tokenFrom(run: GcloudRunner): string | null {
+  const sources = [
+    ["auth", "application-default", "print-access-token"],
+    ["auth", "print-access-token"],
+  ];
+  for (const args of sources) {
+    const r = run(args);
+    if (r.status === 0 && r.stdout.trim()) return r.stdout.trim();
   }
-  return r.stdout.trim();
+  return null;
+}
+
+const spawnGcloud: GcloudRunner = (args) => {
+  const r = spawnSync("gcloud", args, { encoding: "utf8" });
+  return { status: r.status, stdout: r.stdout ?? "" };
+};
+
+function gcloudToken(): string {
+  const t = tokenFrom(spawnGcloud);
+  if (!t) throw new ApiError(0, "no gcloud token. Run `chime login`, or `gcloud auth login`.");
+  return t;
 }
 
 export function createVertexTransport(opts: VertexTransportOptions): Transport {

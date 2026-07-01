@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createVertexTransport } from "../src/vertex.ts";
+import { createVertexTransport, tokenFrom, type GcloudRunner } from "../src/vertex.ts";
 import type { CreateMessageRequest } from "../src/types.ts";
 
 const req: CreateMessageRequest = {
@@ -29,6 +29,22 @@ function fakeFetch(capture: { url?: string; auth?: string; body?: unknown }) {
     return new Response(JSON.stringify(data), { status: 200, headers: { "content-type": "application/json" } });
   };
 }
+
+test("tokenFrom prefers ADC, falls back to the user login, else null", () => {
+  // ADC works → its token, no user-login attempt
+  const adc: GcloudRunner = (args) =>
+    args.includes("application-default") ? { status: 0, stdout: "ADC\n" } : { status: 0, stdout: "USER\n" };
+  assert.equal(tokenFrom(adc), "ADC");
+
+  // ADC fails → fall back to the plain user login
+  const userOnly: GcloudRunner = (args) =>
+    args.includes("application-default") ? { status: 1, stdout: "" } : { status: 0, stdout: "USER\n" };
+  assert.equal(tokenFrom(userOnly), "USER");
+
+  // neither works → null (caller signs in / errors)
+  const none: GcloudRunner = () => ({ status: 1, stdout: "" });
+  assert.equal(tokenFrom(none), null);
+});
 
 test("builds the Vertex URL from project/location/model and sends a Bearer token", async () => {
   const cap: { url?: string; auth?: string; body?: unknown } = {};

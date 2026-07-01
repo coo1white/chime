@@ -3,6 +3,20 @@
 All notable changes to Chime are noted here. Versions are small on purpose —
 one capability per step, slow and steady.
 
+## 0.0.2
+
+Smoother `chime login`.
+
+- **Capability**: `chime login` now reuses any working gcloud credential — either
+  Application Default Credentials **or** a plain `gcloud auth login` — and skips the
+  browser when one already works. It only signs in when there is no token, and gives
+  clear next steps (check every consent box; try `gcloud auth login`; Workspace
+  domains may block the scope) instead of a bare failure.
+- **Implementation**: `tokenFrom()` tries the two token sources in order; the Vertex
+  transport and login share it. No forced re-login.
+- **Tests**: token-source order/fallback covered (`tokenFrom`).
+- **Risk**: low — read-only credential checks; nothing saved unless a token works.
+
 ## 0.0.1
 
 First public release. Chime is a personal terminal secretary with a small tool
