@@ -68,7 +68,7 @@ never goes stale. Four read-only tools work over it:
 | `project_doctor` | "how healthy is X?", "diagnose X", "score all my projects" | auto-detects the toolchain and scores the repo 0–100 (A–F) from read-only health probes, worst-first, each with a fix command |
 | `project_health` | "is my app up?" | curls the deployed health URL, reports the HTTP code |
 | `memory` | "remember X about this repo", "what did we do last time?" | read/append a per-project notebook under `~/.chime/memory` |
-| `handoff` | "propose X to Claude", "review proposal P1", "what's open?" | read/append the shared Chime⇄Claude ledger under `~/.chime/handoff` |
+| `handoff` | "propose X to codex", "review P1 as gemini", "status of P1", "what's open?" | read/append the shared multi-agent ledger under `~/.chime/handoff` |
 
 ```
 chime> list my projects
@@ -112,28 +112,35 @@ It also **grows with you**: the `memory` tool keeps a per-project notebook under
 the same shape the repos use in `PROJECT_MEMORY.md`), so Chime recalls a project's state
 between sessions.
 
-### The handoff ledger — Chime ⇄ Claude Code
+### The handoff ledger — multi-agent, cross-platform collaboration
 
-`handoff` is a **shared review channel** so Chime and Claude Code can review each
-other and pass work back and forth. It is Chime's own data (a JSON ledger under
-`~/.chime/handoff/ledger.json`) that both sides read and append — so the data is
-genuinely shared, while Chime stays **read-only on your project code**. Two verbs:
+`handoff` is a **shared, vendor-neutral channel** where any agents — Claude, Codex,
+DeepSeek, Gemini, Chime, … — propose changes and review each other. It is Chime's own
+data (a JSON ledger under `~/.chime/handoff/ledger.json`) that every agent reads and
+appends, so the ledger doesn't care who writes: arbitrary **permutations** of agents
+collaborate over it, while Chime stays **read-only on your project code**. The verbs:
 
-- **`propose`** — Chime records a structured change proposal (title, rationale,
-  target files, suggested branch) instead of editing code. Claude Code picks up an
-  accepted proposal and turns it into a **real PR**.
-- **`review`** — either side records a verdict (`approve` / `request-changes` /
-  `comment`) about a proposal id or an external PR ref. When it targets a proposal
-  in the ledger, that proposal's status advances (→ accepted / changes-requested).
+- **`propose`** — an agent records a structured change proposal (title, rationale,
+  target files, suggested branch) instead of editing code. A coding agent picks up an
+  accepted proposal and turns it into a **real PR**. `from`/`to` name the agents;
+  `to: all` broadcasts a proposal to the whole panel.
+- **`review`** — any agent records a verdict (`approve` / `request-changes` /
+  `comment`) about a proposal id or an external PR ref. A proposal can gather reviews
+  from **many** agents; its status reflects the **consensus** of the whole panel (net
+  of approvals over change-requests), so three approvals outweigh one block and a lone
+  block still holds it.
+- **`status`** shows one proposal with its review panel and computed consensus;
+  **`list`** shows what's open.
 
-`list` shows what's open. Entries carry a `to` field, so proposals can flow either
-direction (`chime → claude` or `claude → chime`). The loop: *Chime proposes → Claude
-reviews & opens a PR → Claude proposes → Chime reviews* — mutual review, common
-progress, neither one mutating the other's code.
+The loop: *one agent proposes → a panel of agents reviews → consensus accepts →  a
+coding agent opens the PR → another agent proposes next* — mutual review, common
+progress, no agent mutating another's code. Because identities are open slugs, a new
+platform joins with **no code change** — it just reads and writes the same ledger.
 
 ```
-chime> propose to Claude: add a CI-wired probe to project_doctor
-chime> review P1 approve
+chime> propose to all (from codex): unify retry/backoff in http.ts
+chime> review P1 approve as gemini
+chime> status of P1          # -> panel: claude+gemini approve, deepseek blocks -> accepted
 chime> what handoffs are open?
 ```
 

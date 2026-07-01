@@ -5,21 +5,25 @@ one capability per step, slow and steady.
 
 ## Unreleased
 
-The handoff ledger — Chime ⇄ Claude Code interop.
+The handoff ledger — multi-agent, cross-platform collaboration.
 
-- **Capability**: `handoff` gives Chime and Claude Code a shared channel to review
-  each other and pass work back and forth. `propose` records a structured change
-  proposal (Chime stays read-only on code — it proposes; Claude Code turns an
-  accepted proposal into a real PR). `review` records a verdict (approve /
-  request-changes / comment) about a proposal id or an external PR ref, advancing
-  the targeted proposal's status. `list` shows what's open. Entries carry a `to`
-  field so proposals flow either direction — mutual review, common progress.
+- **Capability**: `handoff` is a shared, vendor-neutral channel where any agents
+  (Claude, Codex, DeepSeek, Gemini, Chime, …) propose changes and review each other.
+  `propose` records a structured change proposal (an agent proposes instead of
+  editing code; a coding agent turns an accepted proposal into a real PR). `review`
+  records a verdict (approve / request-changes / comment) about a proposal id or PR
+  ref; a proposal gathers reviews from many agents and its status reflects the
+  **consensus** of the whole panel. `status` shows one proposal with its panel and
+  consensus; `list` shows what's open. Every entry has `from`/`to` (open agent slugs,
+  or `to: all` to broadcast), so arbitrary permutations of agents collaborate and a
+  new platform joins with no code change.
 - **Implementation**: one `src/tools/handoff.ts` + one registry row. A JSON ledger
   at `~/.chime/handoff/ledger.json` — Chime's own data, so appending never touches
-  the user's project code. Parsing, id allocation, and verdict→status are pure
-  functions; the ledger fails soft (a junk file reads as empty).
-- **Tests**: 13 offline tests — pure helpers, propose/review round-trip (a verdict
-  advances its proposal), list filters, bidirectional `to`, and fail-closed paths.
+  the user's project code. Agent normalization, id allocation, single-verdict status,
+  and panel `consensus` are pure functions; the ledger fails soft (junk reads empty).
+- **Tests**: 18 offline tests — pure helpers (normalizeAgent, consensus), the
+  propose→multi-agent-review round-trip (panel consensus advances the proposal),
+  `status`, list filters, broadcast/bidirectional routing, and fail-closed paths.
 - **Risk**: low — writes only under `~/.chime`; fails closed and never mutates the
   user's repos.
 
