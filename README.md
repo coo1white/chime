@@ -36,10 +36,11 @@ export ANTHROPIC_API_KEY=sk-ant-...  # Claude         (default model claude-opus
 chime
 ```
 
-Chime picks the backend for you: an env key wins if set, else a saved `chime login`
-(Vertex). `chime login` uses gcloud Application Default Credentials, so after signing
-in once you never paste a key. Enable the **Vertex AI API** for the project first.
-(No `npm link`? use `npm start`.)
+Chime picks the backend for you: `CHIME_BACKEND` if set, else a **saved `chime login`**
+(it *pins* the backend — a stray `GEMINI_API_KEY` in your shell won't silently override
+it), else a present API key. `chime login` uses gcloud Application Default Credentials,
+so after signing in once you never paste a key. Enable the **Vertex AI API** for the
+project first. (No `npm link`? use `npm start`.)
 
 ## Use
 
@@ -174,8 +175,12 @@ Turn routing off with `CHIME_ROUTER=0` (then it always uses the balanced model).
 Default tiers — gemini: `gemini-2.5-flash-lite` / `gemini-2.5-flash` / `gemini-2.5-pro`;
 claude: `claude-haiku-4-5` / `claude-sonnet-5` / `claude-opus-4-8`.
 
-At least one API key is required — Chime fails closed if none is set. With both,
-Anthropic wins unless `CHIME_BACKEND=gemini`.
+**Backend precedence**: `CHIME_BACKEND` (explicit) > a **saved `chime login`** (pins
+the backend) > a present API key. So once you `chime login` (Vertex), a stray
+`GEMINI_API_KEY` will **not** silently switch you to the free tier — Chime stays on your
+private backend and says so on the startup line. With no saved login and no
+`CHIME_BACKEND`, a present key is used (Anthropic wins if both keys are set). Fails
+closed if nothing is configured.
 
 ## Develop
 

@@ -84,15 +84,21 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   let vertexProject: string | undefined;
   let vertexLocation: string | undefined;
 
-  if (explicit === "vertex") {
+  // A saved `chime login` PINS the backend: it wins over a stray env API key, so a
+  // leftover GEMINI_API_KEY can't silently drop a private Vertex user onto the free
+  // tier. CHIME_BACKEND is the one deliberate override. With no saved login, a
+  // present key selects the backend as before.
+  const chosen = explicit || fileCfg.backend;
+
+  if (chosen === "vertex") {
     ({ project: vertexProject, location: vertexLocation } = vertexCoords());
     backend = "vertex";
-  } else if (explicit === "gemini") {
-    if (!gem) throw new ConfigError("CHIME_BACKEND=gemini but GEMINI_API_KEY is not set.");
+  } else if (chosen === "gemini") {
+    if (!gem) throw new ConfigError("gemini backend selected but GEMINI_API_KEY is not set.");
     backend = "gemini";
     apiKey = gem;
-  } else if (explicit === "anthropic") {
-    if (!ant) throw new ConfigError("CHIME_BACKEND=anthropic but ANTHROPIC_API_KEY is not set.");
+  } else if (chosen === "anthropic") {
+    if (!ant) throw new ConfigError("anthropic backend selected but ANTHROPIC_API_KEY is not set.");
     backend = "anthropic";
     apiKey = ant;
   } else if (ant) {
@@ -101,9 +107,6 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   } else if (gem) {
     backend = "gemini";
     apiKey = gem;
-  } else if (fileCfg.backend === "vertex") {
-    ({ project: vertexProject, location: vertexLocation } = vertexCoords());
-    backend = "vertex";
   } else {
     throw new ConfigError("No brain configured. Set ANTHROPIC_API_KEY or GEMINI_API_KEY, or run `chime login` for Vertex.");
   }

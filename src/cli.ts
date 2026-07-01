@@ -35,6 +35,14 @@ export async function main(): Promise<number> {
   process.stderr.write(
     `[chime] backend=${config.backend}${where} router=${config.router ? "on" : "off"} model=${config.model}\n`,
   );
+  // If a key is set but the saved login pinned a different backend, say so — don't
+  // let a stray env key look like it's in charge.
+  const strayKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.ANTHROPIC_API_KEY;
+  if (config.backend === "vertex" && strayKey && process.env.CHIME_BACKEND !== "vertex") {
+    process.stderr.write(
+      "[chime] note: backend pinned to vertex by your saved login; ignoring an env API key. Set CHIME_BACKEND to override.\n",
+    );
+  }
 
   await repl({
     transport: buildTransport(config),

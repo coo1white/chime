@@ -5,6 +5,17 @@ one capability per step, slow and steady.
 
 ## Unreleased
 
+Pin the backend to your saved login (privacy lock).
+
+- **Capability**: a saved `chime login` now **wins over a stray env API key**. Once
+  you're on Vertex, a leftover `GEMINI_API_KEY` in your shell can no longer silently
+  switch you to the free tier (where inputs are used to improve Google products). The
+  startup line says when an env key is being ignored. `CHIME_BACKEND` is the one
+  deliberate override, so backend precedence is `CHIME_BACKEND` > saved login > key.
+- **Implementation**: one-line reorder in `loadConfig` plus a cli note; no key path
+  removed.
+- **Tests**: saved-vertex pins over a stray key; `CHIME_BACKEND` still overrides.
+
 `project_doctor` — a CI probe.
 
 - **Probe**: `project_doctor` now warns when a repo has no continuous-integration

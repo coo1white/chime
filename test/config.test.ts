@@ -110,8 +110,13 @@ test("vertex without a project fails closed", () => {
   assert.throws(() => cfg({ CHIME_BACKEND: "vertex" }), ConfigError);
 });
 
-test("a present API key beats a saved vertex login", () => {
+test("a saved vertex login PINS over a stray env key (privacy lock)", () => {
   const home = homeWithConfig({ backend: "vertex", project: "p" });
-  const c = loadConfig({ HOME: home, ANTHROPIC_API_KEY: "a" });
-  assert.equal(c.backend, "anthropic");
+  // a leftover GEMINI_API_KEY must NOT silently switch a private vertex user to the free tier
+  const pinned = loadConfig({ HOME: home, GEMINI_API_KEY: "stray", ANTHROPIC_API_KEY: "a" });
+  assert.equal(pinned.backend, "vertex");
+  assert.equal(pinned.vertexProject, "p");
+  // CHIME_BACKEND is the deliberate escape hatch
+  const overridden = loadConfig({ HOME: home, ANTHROPIC_API_KEY: "a", CHIME_BACKEND: "anthropic" });
+  assert.equal(overridden.backend, "anthropic");
 });
