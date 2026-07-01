@@ -49,6 +49,7 @@ test("BUILTIN_CAPABILITIES: unique snake_case names, object schemas", () => {
   const names = BUILTIN_CAPABILITIES.map((c) => c.name);
   assert.equal(new Set(names).size, names.length, "names must be unique");
   assert.ok(names.includes("disk_maintenance"));
+  assert.ok(names.includes("self_iteration"));
   for (const n of names) {
     assert.match(n, /^[a-z][a-z0-9_]*$/, `not snake_case: ${n}`);
   }
