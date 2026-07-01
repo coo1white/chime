@@ -33,7 +33,14 @@ const cards = status.projects as { name: string; version?: string }[];
 assert(cards.length === rows.length, "one status card per project");
 process.stdout.write(`smoke-secretary: project_status/all -> ${cards.length} cards\n`);
 
-// 3) an unknown tool still fails closed (dispatch never throws).
+// 3) project_doctor all — a read-only health board, one graded card per repo.
+const board = await call("project_doctor", { name: "all" });
+assert(board.ok === true, "project_doctor/all ok");
+const scored = board.projects as { name: string; score?: number; grade?: string }[];
+assert(scored.length === rows.length, "one doctor card per project");
+process.stdout.write(`smoke-secretary: project_doctor/all -> ${scored.length} graded cards\n`);
+
+// 4) an unknown tool still fails closed (dispatch never throws).
 const bad = await call("no_such_tool", {});
 assert(bad.ok === false, "unknown tool fails closed");
 
