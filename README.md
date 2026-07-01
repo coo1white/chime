@@ -65,6 +65,7 @@ never goes stale. Four read-only tools work over it:
 | `projects` | "what projects do I have?", "what's X's mantra/command?" | list every repo, or one project's card |
 | `project_status` | "is X dirty? what branch/version?" | live `git` branch/dirty/HEAD + version, one repo or `all` |
 | `project_check` | "is X green / does it still typecheck?" | runs the repo's own fast lint/typecheck, reports PASS/FAIL |
+| `project_doctor` | "how healthy is X?", "diagnose X", "score all my projects" | auto-detects the toolchain and scores the repo 0–100 (A–F) from read-only health probes, worst-first, each with a fix command |
 | `project_health` | "is my app up?" | curls the deployed health URL, reports the HTTP code |
 | `memory` | "remember X about this repo", "what did we do last time?" | read/append a per-project notebook under `~/.chime/memory` |
 
@@ -72,8 +73,29 @@ never goes stale. Four read-only tools work over it:
 chime> list my projects
 chime> status of web-app
 chime> is web-app green?
+chime> how healthy is web-app?
+chime> score all my projects
 chime> is web-app up?
 ```
+
+### The doctor — one score, prioritized fixes
+
+`project_doctor` internalizes the core idea behind [react.doctor](https://react.doctor)
+(one command → a whole-project health score with actionable diagnostics) and makes it
+**language-agnostic** and **read-only**. It auto-detects the toolchain (Node, Rust,
+Python, Go, Ruby) from marker files, runs a battery of independent, non-mutating
+probes, then aggregates them into a **0–100 score + letter grade** with the findings
+sorted worst-first — each carrying the exact next-step command to fix it. The probes:
+
+- **git hygiene** — under version control? working tree clean? in sync with upstream
+  (ahead / behind)? stale (no commits in 90+ days)?
+- **dependency pinning** — a manifest with no lockfile is a reproducibility hole
+- **housekeeping** — a README and a `.gitignore`
+- **committed build output** — `node_modules`, `dist`, `target`, … shouldn't be tracked
+- **a fast gate** — does the project declare a `check` command Chime can run?
+
+Like the rest of Chime it **never mutates**: every fix is returned as a command string
+for you to run. Pass `all` for a health board ranked worst-first across every repo.
 
 The registry is **private and local** — Chime reads it from `~/.chime/projects.json`
 (it is never committed). Copy [`projects.example.json`](projects.example.json) to

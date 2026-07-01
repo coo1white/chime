@@ -3,6 +3,27 @@
 All notable changes to Chime are noted here. Versions are small on purpose —
 one capability per step, slow and steady.
 
+## Unreleased
+
+The doctor — a universal project health score.
+
+- **Capability**: `project_doctor` diagnoses a whole project and reports a 0–100
+  score with an A–F grade and prioritized, actionable findings. It internalizes the
+  core idea behind [react.doctor](https://react.doctor) — one command → a health
+  score with fixes — and makes it language-agnostic and strictly read-only. It
+  auto-detects the toolchain (Node, Rust, Python, Go, Ruby) and runs non-mutating
+  probes: git hygiene (repo? clean? in sync? stale?), dependency pinning (lockfile?),
+  housekeeping (README, `.gitignore`), committed build artifacts, and whether a fast
+  check gate is wired. Pass `all` for a health board ranked worst-first.
+- **Implementation**: one `src/tools/project-doctor.ts` + one registry row. Scoring
+  and toolchain detection are pure functions; findings are gathered by thin `git`
+  read commands and directory listings. Every fix is returned as a next-step command,
+  never run.
+- **Tests**: 16 offline tests — pure scoring/grade bands, toolchain detection, each
+  probe driven by a fake git, and a real temp-directory diagnosis.
+- **Risk**: low — read-only git/log/ls-files and directory reads; fails closed and
+  never mutates.
+
 ## 0.0.2
 
 Smoother `chime login`.
