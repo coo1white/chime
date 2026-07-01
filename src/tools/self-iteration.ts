@@ -1,15 +1,21 @@
 import { existsSync } from "node:fs";
+import { isAbsolute, relative, resolve } from "node:path";
 import type { Capability, HandlerContext, JsonSchema, ToolResultPayload } from "../types.ts";
 import { findProject, loadProjects, projectPath } from "../projects.ts";
 
 function git(ctx: HandlerContext, path: string, args: string[]): { ok: boolean; out: string } {
   const r = ctx.runCommand("git", ["-C", path, ...args], { timeoutMs: 15_000 });
   if (r.status !== 0 || r.error) return { ok: false, out: (r.stderr || r.error || "").trim() };
-  return { ok: true, out: r.stdout.trim() };
+  return { ok: true, out: r.stdout };
 }
 
 function lines(text: string): string[] {
   return text.split("\n").filter((s) => s.trim() !== "");
+}
+
+function insideHome(path: string, home: string): boolean {
+  const rel = relative(resolve(home), resolve(path));
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
 function classify(files: string[]): { staged: string[]; unstaged: string[]; untracked: string[] } {
@@ -39,11 +45,12 @@ const inputSchema: JsonSchema = {
 };
 
 function handler(input: Record<string, unknown>, ctx: HandlerContext): ToolResultPayload {
-  const name = String(input.name ?? "");
+  const name = typeof input.name === "string" ? input.name.trim() : "";
   if (!name) return { ok: false, error: "name is required" };
   const p = findProject(name, loadProjects(ctx.home));
   if (!p) return { ok: false, name, error: `unknown project: ${name}` };
   const path = projectPath(p, ctx.home);
+  if (!insideHome(path, ctx.home)) return { ok: false, name, error: "project path outside home" };
   if (!existsSync(path)) return { ok: false, name, error: "path not found" };
 
   const branch = git(ctx, path, ["rev-parse", "--abbrev-ref", "HEAD"]);
@@ -65,8 +72,8 @@ function handler(input: Record<string, unknown>, ctx: HandlerContext): ToolResul
   return {
     ok: true,
     name,
-    branch: branch.ok ? branch.out : "unknown",
-    head: head.ok ? head.out : "unknown",
+    branch: branch.ok ? branch.out.trim() : "unknown",
+    head: head.ok ? head.out.trim() : "unknown",
     dirty,
     changedFiles,
     staged: c.staged,
