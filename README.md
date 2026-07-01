@@ -71,6 +71,7 @@ never goes stale. Four read-only tools work over it:
 | `memory` | "remember X about this repo", "what did we do last time?" | read/append a per-project notebook under `~/.chime/memory` |
 | `handoff` | "propose X to codex", "review P1 as gemini", "status of P1", "what's open?" | read/append the shared multi-agent ledger under `~/.chime/handoff` |
 | `ledger` | "verify this proposal from cool-workflow", "check my handoff inbox", "propose X to cw", "review ldg-… approved" | verify or mint `cw ledger`-compatible, sha256-sealed handoff entries — fail-closed |
+| `self_iteration` | "self-iterate on Chime", "what should we improve next time?" | read-only workflow review: git scope, what to keep, what to change, next steps |
 
 ```
 chime> list my projects
@@ -79,6 +80,7 @@ chime> is web-app green?
 chime> how healthy is web-app?
 chime> score all my projects
 chime> is web-app up?
+chime> self-iterate on chime
 ```
 
 ### The doctor — one score, prioritized fixes
