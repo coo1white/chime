@@ -169,8 +169,8 @@ export function verifyLedgerEntry(raw: unknown): LedgerVerifyResult {
     checks.push({ name, pass: false, code, detail });
     return {
       ok: false,
-      id: isRecord(raw) && typeof raw.id === "string" ? raw.id : null,
-      kind: isRecord(raw) && typeof raw.kind === "string" ? raw.kind : null,
+      id: null,
+      kind: null,
       checks,
       failedChecks: checks.filter((c) => !c.pass).map((c) => ({ name: c.name, code: c.code as string, detail: c.detail })),
     };
@@ -180,10 +180,10 @@ export function verifyLedgerEntry(raw: unknown): LedgerVerifyResult {
   checks.push({ name: "structure", pass: true });
 
   const kind = raw.kind;
-  if (kind !== "proposal" && kind !== "review") return fail("kind", "ledger-unknown-kind", `kind must be proposal|review, got ${JSON.stringify(kind)}`);
+  if (kind !== "proposal" && kind !== "review") return fail("kind", "ledger-unknown-kind", "kind must be proposal|review");
   checks.push({ name: "kind", pass: true });
 
-  if (raw.schemaVersion !== 1) return fail("schema", "ledger-bad-schema", `schemaVersion must be 1, got ${JSON.stringify(raw.schemaVersion)}`);
+  if (raw.schemaVersion !== 1) return fail("schema", "ledger-bad-schema", "schemaVersion must be 1");
   checks.push({ name: "schema", pass: true });
 
   if (typeof raw.digest !== "string" || !raw.digest) return fail("digest-present", "ledger-missing-digest", "digest is absent or not a string");
@@ -196,7 +196,7 @@ export function verifyLedgerEntry(raw: unknown): LedgerVerifyResult {
     content[field] = raw[field];
   }
   if (kind === "review" && raw.verdict !== "APPROVED" && raw.verdict !== "REJECTED") {
-    return fail("verdict", "ledger-bad-verdict", `verdict must be APPROVED|REJECTED, got ${JSON.stringify(raw.verdict)}`);
+    return fail("verdict", "ledger-bad-verdict", "verdict must be APPROVED|REJECTED");
   }
   checks.push({ name: "fields", pass: true });
 
@@ -213,7 +213,7 @@ export function verifyLedgerEntry(raw: unknown): LedgerVerifyResult {
   // them. Fail closed so a spoofed or absent id is refused, not trusted.
   const expectedId = deriveId(raw.digest);
   if (raw.id !== expectedId) {
-    return fail("id", "ledger-id-mismatch", `id ${JSON.stringify(raw.id)} is not the content-addressed id for this digest (expected ${expectedId})`);
+    return fail("id", "ledger-id-mismatch", `id is not the content-addressed id for this digest (expected ${expectedId})`);
   }
   checks.push({ name: "id", pass: true });
 
@@ -268,8 +268,8 @@ export function listLedgerEntries(dir: string): LedgerListResult {
       file: name,
       id: result.id,
       kind: result.kind,
-      from: typeof rec.from === "string" ? rec.from : null,
-      to: typeof rec.to === "string" ? rec.to : null,
+      from: result.ok && typeof rec.from === "string" ? rec.from : null,
+      to: result.ok && typeof rec.to === "string" ? rec.to : null,
       ok: result.ok,
       failedChecks: result.failedChecks,
     };

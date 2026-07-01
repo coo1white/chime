@@ -159,6 +159,61 @@ test("verify rejects a review with a bad verdict shape (content intact)", () => 
 });
 
 // ---------------------------------------------------------------------------
+// SECURITY REGRESSION: on failure, verifyLedgerEntry must never echo back a
+// raw, unverified field from the input. A malformed/unrelated JSON object read
+// via `file`/`dir` must not have its content reflected into the response.
+// ---------------------------------------------------------------------------
+
+test("SECURITY: verify on an arbitrary non-ledger object never echoes raw fields on failure", () => {
+  const raw = { id: "SECRET-1", kind: "not-a-real-kind" };
+  const res = verifyLedgerEntry(raw);
+  assert.equal(res.ok, false);
+  assert.equal(res.id, null);
+  assert.equal(res.kind, null);
+  const haystacks = [
+    ...res.checks.map((c) => c.detail ?? ""),
+    ...res.failedChecks.map((c) => c.detail ?? ""),
+  ];
+  for (const s of haystacks) {
+    assert.ok(!s.includes("SECRET-1"), `detail leaked raw id: ${s}`);
+    assert.ok(!s.includes("not-a-real-kind"), `detail leaked raw kind: ${s}`);
+  }
+});
+
+test("SECURITY: listLedgerEntries on a non-ledger JSON file never surfaces its raw from/to", () => {
+  const dir = tempDir();
+  writeFileSync(join(dir, "leak.json"), JSON.stringify({ from: "victim@internal", to: "root" }));
+  const res = listLedgerEntries(dir);
+  assert.equal(res.allOk, false);
+  assert.equal(res.entries.length, 1);
+  assert.equal(res.entries[0].from, null);
+  assert.equal(res.entries[0].to, null);
+});
+
+test("SECURITY: a legitimate proposal/review still verifies ok with real id/kind surfaced", () => {
+  const p = buildLedgerProposal({ from: "chime", to: "cool-workflow", title: "t", rationale: "r", targetFiles: [], createdAt: WHEN });
+  const pRes = verifyLedgerEntry(p);
+  assert.equal(pRes.ok, true);
+  assert.equal(pRes.id, p.id);
+  assert.equal(pRes.kind, "proposal");
+
+  const r = buildLedgerReview({ from: "chime", to: "cool-workflow", target: "ldg-abc", verdict: "REJECTED", findings: ["nope"], createdAt: WHEN });
+  const rRes = verifyLedgerEntry(r);
+  assert.equal(rRes.ok, true);
+  assert.equal(rRes.id, r.id);
+  assert.equal(rRes.kind, "review");
+
+  const dir = tempDir();
+  writeEntry(dir, p);
+  const listed = listLedgerEntries(dir);
+  assert.equal(listed.allOk, true);
+  assert.equal(listed.entries[0].id, p.id);
+  assert.equal(listed.entries[0].kind, "proposal");
+  assert.equal(listed.entries[0].from, "chime");
+  assert.equal(listed.entries[0].to, "cool-workflow");
+});
+
+// ---------------------------------------------------------------------------
 // Git-transport helpers — verify a directory / union of mirrors, fail-closed.
 // ---------------------------------------------------------------------------
 
