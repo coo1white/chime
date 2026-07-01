@@ -6,7 +6,8 @@ import { projectCheck } from "./project-check.ts";
 import { projectDoctor } from "./project-doctor.ts";
 import { projectHealth } from "./project-health.ts";
 import { memory } from "./memory.ts";
+import { handoff } from "./handoff.ts";
 
 // Every tool module appends its capability here. The registry spreads this array,
 // so adding a feature is one module + one entry — nothing else changes.
-export const TOOLS: Capability[] = [colimaDisk, projects, projectStatus, projectCheck, projectDoctor, projectHealth, memory];
+export const TOOLS: Capability[] = [colimaDisk, projects, projectStatus, projectCheck, projectDoctor, projectHealth, memory, handoff];
