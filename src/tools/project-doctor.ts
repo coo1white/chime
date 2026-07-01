@@ -154,7 +154,7 @@ export function probe(p: Project, ctx: HandlerContext, files: Set<string>, path:
     }
   }
 
-  // 6. Housekeeping — a README and a .gitignore.
+  // 6. Housekeeping — a README, a .gitignore, and a license.
   findings.push(
     has(/^readme(\.|$)/i)
       ? { id: "readme", severity: "ok", title: "has a README" }
@@ -164,6 +164,11 @@ export function probe(p: Project, ctx: HandlerContext, files: Set<string>, path:
     files.has(".gitignore")
       ? { id: "gitignore", severity: "ok", title: "has a .gitignore" }
       : { id: "gitignore", severity: "warn", title: "no .gitignore", fix: "add a .gitignore" },
+  );
+  findings.push(
+    has(/^(licen[sc]e|copying)(\.|$)/i)
+      ? { id: "license", severity: "ok", title: "has a license" }
+      : { id: "license", severity: "warn", title: "no license — reuse terms undefined", fix: "add a LICENSE file (e.g. MIT) and declare it in the manifest" },
   );
 
   // 7. Dependency pinning — a manifest with no lockfile is a reproducibility hole.
@@ -260,7 +265,7 @@ function handler(input: Record<string, unknown>, ctx: HandlerContext): ToolResul
 export const projectDoctor: Capability = {
   name: "project_doctor",
   description:
-    "Run a whole-project health diagnosis and report a 0-100 score with a letter grade and prioritized, actionable findings. Auto-detects the toolchain (Node, Rust, Python, Go, Ruby) and runs read-only probes: git hygiene (repo? clean? in sync? stale?), dependency pinning (lockfile present?), housekeeping (README, .gitignore), committed build artifacts, and whether a fast check gate is wired. Call this when the user asks 'how healthy is X', 'diagnose X', 'what's wrong with X', or 'score all my projects' (pass 'all' for a leaderboard). Strictly read-only: it runs git status/log/ls-files and reads directory listings; every fix is returned as a next-step command, never run.",
+    "Run a whole-project health diagnosis and report a 0-100 score with a letter grade and prioritized, actionable findings. Auto-detects the toolchain (Node, Rust, Python, Go, Ruby) and runs read-only probes: git hygiene (repo? clean? in sync? stale?), dependency pinning (lockfile present?), housekeeping (README, .gitignore, license), committed build artifacts, and whether a fast check gate is wired. Call this when the user asks 'how healthy is X', 'diagnose X', 'what's wrong with X', or 'score all my projects' (pass 'all' for a leaderboard). Strictly read-only: it runs git status/log/ls-files and reads directory listings; every fix is returned as a next-step command, never run.",
   inputSchema,
   handler,
 };

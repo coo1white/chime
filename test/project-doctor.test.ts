@@ -74,7 +74,7 @@ test("detectToolchain: recognizes Node, Rust, Go; unknown otherwise", () => {
 // --- probes drive findings --------------------------------------------------
 
 test("probe: a pristine node repo yields only ok findings", () => {
-  const files = new Set(["package.json", "package-lock.json", "README.md", ".gitignore"]);
+  const files = new Set(["package.json", "package-lock.json", "README.md", ".gitignore", "LICENSE"]);
   const ctx = gitCtx("/home", {
     "rev-parse": { status: 0, stdout: "true", stderr: "" },
     status: { status: 0, stdout: "", stderr: "" },
@@ -126,6 +126,18 @@ test("probe: manifest without a lockfile warns; missing README/gitignore warn", 
   assert.equal(findings.find((f) => f.id === "readme")!.severity, "warn");
   assert.equal(findings.find((f) => f.id === "gitignore")!.severity, "warn");
   assert.equal(findings.find((f) => f.id === "sync")!.severity, "skip"); // no upstream is not a defect
+});
+
+test("probe: a missing license warns; LICENSE/COPYING variants satisfy it", () => {
+  const ctx = gitCtx("/home", { "rev-parse": { status: 128, stdout: "", stderr: "x" } });
+  const missing = probe(base, ctx, new Set(["README.md"]), "/home/Developer/demo").find((f) => f.id === "license")!;
+  assert.equal(missing.severity, "warn");
+  assert.match(missing.title, /no license/i);
+
+  for (const name of ["LICENSE", "LICENSE.md", "license.txt", "COPYING", "LICENCE"]) {
+    const ok = probe(base, ctx, new Set([name]), "/home/Developer/demo").find((f) => f.id === "license")!;
+    assert.equal(ok.severity, "ok", `${name} should satisfy the license probe`);
+  }
 });
 
 test("probe: committed build artifacts warn with a git rm fix", () => {
