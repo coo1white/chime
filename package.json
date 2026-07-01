@@ -3,6 +3,7 @@
   "version": "0.0.2",
   "private": true,
   "description": "Chime — a personal terminal conversational assistant (zero runtime deps).",
+  "license": "MIT",
   "type": "module",
   "bin": {
     "chime": "bin/chime.js"
