@@ -11,11 +11,11 @@ const FIXTURE: Project[] = [
   { name: "demo", path: "Developer/demo", kind: "TS CLI", summary: "x", remotes: [] },
 ];
 
-function tempHome(): string {
+function tempHome(projects = FIXTURE): string {
   const home = mkdtempSync(join(tmpdir(), "chime-self-"));
   mkdirSync(join(home, ".chime"), { recursive: true });
   mkdirSync(join(home, "Developer", "demo"), { recursive: true });
-  writeFileSync(registryPath(home), JSON.stringify(FIXTURE));
+  writeFileSync(registryPath(home), JSON.stringify(projects));
   return home;
 }
 
@@ -40,6 +40,16 @@ test("self_iteration: clean tree returns the standard loop and next branch step"
   assert.deepEqual(r.nextSteps, ["start a feature branch before editing"]);
 });
 
+test("self_iteration: requires a non-empty string name", async () => {
+  const home = tempHome();
+  const blank = await selfIteration.handler({ name: "  " }, ctx(home));
+  const numeric = await selfIteration.handler({ name: 123 }, ctx(home));
+  assert.equal(blank.ok, false);
+  assert.equal(numeric.ok, false);
+  assert.match(String(blank.error), /name is required/);
+  assert.match(String(numeric.error), /name is required/);
+});
+
 test("self_iteration: dirty tree classifies staged, unstaged, and untracked files", async () => {
   const home = tempHome();
   const porcelain = "M  src/a.ts\n M src/b.ts\n?? test/c.test.ts\n";
@@ -52,9 +62,24 @@ test("self_iteration: dirty tree classifies staged, unstaged, and untracked file
   assert.ok((r.findings as string[]).some((f) => /unrelated changes/.test(f)));
 });
 
+test("self_iteration: preserves leading porcelain status on first row", async () => {
+  const home = tempHome();
+  const r = await selfIteration.handler({ name: "demo" }, ctx(home, " M src/first.ts\n"));
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.staged, []);
+  assert.deepEqual(r.unstaged, ["src/first.ts"]);
+});
+
 test("self_iteration: unknown project fails closed", async () => {
   const home = tempHome();
   const r = await selfIteration.handler({ name: "nope" }, ctx(home));
   assert.equal(r.ok, false);
   assert.match(String(r.error), /unknown project/);
+});
+
+test("self_iteration: rejects project paths outside home", async () => {
+  const home = tempHome([{ ...FIXTURE[0]!, path: "../elsewhere" }]);
+  const r = await selfIteration.handler({ name: "demo" }, ctx(home));
+  assert.equal(r.ok, false);
+  assert.match(String(r.error), /outside home/);
 });
