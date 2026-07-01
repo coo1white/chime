@@ -1,0 +1,22 @@
+{
+  "name": "chime",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Chime — a personal terminal conversational assistant (zero runtime deps).",
+  "type": "module",
+  "bin": {
+    "chime": "bin/chime.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.check.json",
+    "test": "node --test",
+    "smoke": "node scripts/smoke-live.ts",
+    "smoke:secretary": "node scripts/smoke-secretary.ts",
+    "start": "node bin/chime.js"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}

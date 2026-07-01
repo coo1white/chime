@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.env
+# Chime's private local data must never be committed:
+.chime/
+projects.json
+

@@ -1,0 +1,41 @@
+[
+  {
+    "name": "example-web",
+    "path": "Developer/example-web",
+    "kind": "Next.js app",
+    "summary": "An example web app — replace with your own.",
+    "mantra": "ask simple -> run simple -> verify simple -> resume simple",
+    "remotes": ["github.com/you/example-web"],
+    "deployedUrl": "https://example.com/health",
+    "versionFile": "package.json",
+    "versionKind": "json",
+    "check": ["pnpm", "lint"],
+    "fullGate": "pnpm lint && pnpm test && pnpm build"
+  },
+  {
+    "name": "example-service",
+    "path": "Developer/example-service",
+    "kind": "TypeScript service",
+    "summary": "An example service with a Makefile gate — replace with your own.",
+    "mantra": "install simple -> update simple -> doctor simple -> fix simple",
+    "remotes": ["local"],
+    "deployedUrl": "https://api.example.com/health",
+    "versionFile": "package.json",
+    "versionKind": "json",
+    "check": ["make", "ts-typecheck"],
+    "fullGate": "make ci",
+    "doctor": ["make", "doctor"]
+  },
+  {
+    "name": "example-cli",
+    "path": "Developer/example-cli",
+    "kind": "Rust CLI",
+    "summary": "An example Rust CLI whose version lives in a subdir — replace with your own.",
+    "remotes": ["github.com/you/example-cli"],
+    "versionFile": "core/Cargo.toml",
+    "versionKind": "cargo",
+    "checkDir": ".",
+    "check": ["cargo", "fmt", "--check"],
+    "fullGate": "cargo test --locked"
+  }
+]
