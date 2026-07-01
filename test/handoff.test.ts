@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { handoff, parseLedger, nextId, statusFromVerdict, ledgerPath, type Entry } from "../src/tools/handoff.ts";
+import { handoff, parseLedger, nextId, statusFromVerdict, normalizeAgent, consensus, ledgerPath, type Entry } from "../src/tools/handoff.ts";
 import type { HandlerContext, ToolResultPayload } from "../src/types.ts";
 
 function ctx(home: string, when = new Date("2026-07-01T00:00:00Z")): HandlerContext {
@@ -51,6 +51,30 @@ test("statusFromVerdict: approve->accepted, request-changes->changes-requested, 
   assert.equal(statusFromVerdict("comment"), "open");
 });
 
+test("normalizeAgent: slugifies any platform id, falls back when empty", () => {
+  assert.equal(normalizeAgent("Codex"), "codex");
+  assert.equal(normalizeAgent("DeepSeek R1"), "deepseek-r1");
+  assert.equal(normalizeAgent("  "), "");
+  assert.equal(normalizeAgent(undefined, "chime"), "chime");
+  assert.equal(normalizeAgent(42, "claude"), "claude");
+});
+
+test("consensus: net of approvals over change-requests decides the panel verdict", () => {
+  const mk = (from: string, verdict: "approve" | "request-changes" | "comment"): Entry => ({
+    id: "R", kind: "review", from, to: "all", title: "", about: "P1", verdict, status: "done", createdAt: "",
+  });
+  // 3 approve + 1 request-changes -> net +2 -> accepted; reviewers listed
+  const c = consensus([mk("claude", "approve"), mk("codex", "approve"), mk("gemini", "approve"), mk("deepseek", "request-changes")]);
+  assert.equal(c.verdict, "accepted");
+  assert.equal(c.approve, 3);
+  assert.equal(c.requestChanges, 1);
+  assert.deepEqual(c.reviewers, ["claude", "codex", "gemini", "deepseek"]);
+  // a lone block ties it back open; a net-negative blocks
+  assert.equal(consensus([mk("a", "approve"), mk("b", "request-changes")]).verdict, "open");
+  assert.equal(consensus([mk("a", "request-changes")]).verdict, "changes-requested");
+  assert.equal(consensus([mk("a", "comment")]).verdict, "open");
+});
+
 // --- propose ----------------------------------------------------------------
 
 test("propose: writes a proposal entry and persists the ledger", async () => {
@@ -87,7 +111,7 @@ test("review: an approve advances the targeted proposal to accepted", async () =
   const r = await call({ action: "review", about: "P1", verdict: "approve", body: "LGTM" }, ctx(home));
   assert.equal(r.ok, true);
   assert.equal(r.id, "R1");
-  assert.deepEqual(r.advanced, { proposal: "P1", status: "accepted" });
+  assert.deepEqual(r.advanced, { proposal: "P1", status: "accepted", reviewers: ["chime"] });
 
   const saved = parseLedger(readFileSync(ledgerPath(home), "utf8"));
   const p1 = saved.find((e) => e.id === "P1")!;
@@ -102,7 +126,38 @@ test("review: request-changes marks the proposal changes-requested", async () =>
   const home = tempHome();
   await call({ action: "propose", title: "risky change" }, ctx(home)); // P1
   const r = await call({ action: "review", about: "P1", verdict: "request-changes" }, ctx(home));
-  assert.deepEqual(r.advanced, { proposal: "P1", status: "changes-requested" });
+  assert.deepEqual(r.advanced, { proposal: "P1", status: "changes-requested", reviewers: ["chime"] });
+});
+
+test("multi-agent: codex proposes, a panel of agents co-reviews, consensus advances it", async () => {
+  const home = tempHome();
+  // Codex proposes to everyone
+  const p = await call({ action: "propose", from: "codex", to: "all", title: "unify retry/backoff in http.ts" }, ctx(home));
+  assert.equal((p.entry as Entry).from, "codex");
+  assert.equal((p.entry as Entry).to, "all");
+
+  // Claude, Gemini approve; DeepSeek requests changes -> net +1 -> accepted
+  await call({ action: "review", from: "claude", about: "P1", verdict: "approve" }, ctx(home));
+  await call({ action: "review", from: "gemini", about: "P1", verdict: "approve" }, ctx(home));
+  const last = await call({ action: "review", from: "deepseek", about: "P1", verdict: "request-changes" }, ctx(home));
+  assert.equal((last.advanced as { status: string }).status, "accepted");
+  assert.deepEqual((last.advanced as { reviewers: string[] }).reviewers, ["claude", "gemini", "deepseek"]);
+});
+
+test("status: reports a proposal with its review panel and consensus", async () => {
+  const home = tempHome();
+  await call({ action: "propose", from: "chime", to: "all", title: "add a CI probe" }, ctx(home)); // P1
+  await call({ action: "review", from: "claude", about: "P1", verdict: "approve" }, ctx(home));
+  await call({ action: "review", from: "codex", about: "P1", verdict: "request-changes" }, ctx(home));
+  const s = await call({ action: "status", about: "P1" }, ctx(home));
+  assert.equal(s.ok, true);
+  assert.equal((s.proposal as Entry).id, "P1");
+  assert.equal((s.reviews as Entry[]).length, 2);
+  assert.equal((s.consensus as { verdict: string }).verdict, "open"); // 1 vs 1 -> tie -> open
+});
+
+test("status: missing about fails closed", async () => {
+  assert.equal((await call({ action: "status" }, ctx(tempHome()))).ok, false);
 });
 
 test("review: about an external PR ref records the verdict without advancing anything", async () => {

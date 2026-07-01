@@ -2,21 +2,25 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { Capability, HandlerContext, JsonSchema, ToolResultPayload } from "../types.ts";
 
-// The handoff ledger — a shared channel between Chime and Claude Code so the two
-// can review each other and hand work back and forth. It is Chime's OWN data
-// (under ~/.chime/handoff), so appending here never breaks the strictly-read-only
-// stance on the user's project code.
+// The handoff ledger — a shared, vendor-neutral channel for MULTI-AGENT,
+// cross-platform collaboration. Any agent (claude, codex, deepseek, gemini,
+// chime, …) can propose changes and review each other's proposals; the ledger
+// does not care who writes, so arbitrary permutations of agents can work
+// together over it. It is Chime's OWN data (under ~/.chime/handoff), so appending
+// here never breaks the strictly-read-only stance on the user's project code.
 //
 // Two verbs over one ledger:
-//   propose — write a structured change proposal (Chime never mutates code; it
-//             proposes, and Claude Code turns an accepted proposal into a real PR).
-//   review  — write a verdict about a proposal (or an external PR ref); when it
-//             targets a proposal in the ledger, that proposal's status advances.
-// `list` reads the ledger back. Both sides read/append the same JSON file, so the
-// data is genuinely shared: Chime writes via this tool; Claude Code writes the
-// same schema directly.
+//   propose — write a structured change proposal (an agent proposes instead of
+//             mutating code; a coding agent turns an accepted proposal into a PR).
+//   review  — write a verdict about a proposal (or an external PR ref). A proposal
+//             can gather reviews from MANY agents; its status reflects the
+//             consensus of all of them, not just the last vote.
+// `list` reads the ledger; `status` shows one proposal with its review panel and
+// the computed consensus. Every entry carries `from`/`to`, so work flows in any
+// direction between any pair (or a broadcast to `all`).
 
-export type Party = "chime" | "claude" | "user";
+// Agent identities are open (any slug), so new platforms need no code change.
+export type Agent = string;
 export type EntryKind = "proposal" | "review";
 export type Verdict = "approve" | "request-changes" | "comment";
 export type Status = "open" | "accepted" | "changes-requested" | "rejected" | "merged" | "done";
@@ -24,8 +28,8 @@ export type Status = "open" | "accepted" | "changes-requested" | "rejected" | "m
 export interface Entry {
   id: string;
   kind: EntryKind;
-  from: Party;
-  to: Party;
+  from: Agent;
+  to: Agent; // a specific agent, or "all" for a broadcast
   title: string;
   body?: string;
   target?: string[]; // proposals: files / areas the change touches
@@ -36,11 +40,24 @@ export interface Entry {
   createdAt: string;
 }
 
-const PARTIES: readonly string[] = ["chime", "claude", "user"];
+// Known platforms — a hint for callers and docs, NOT an allow-list. Any non-empty
+// slug is accepted, so Claude/Codex/DeepSeek/Gemini/… compose without code edits.
+export const KNOWN_AGENTS = ["claude", "codex", "deepseek", "gemini", "chime", "user"] as const;
 const VERDICTS: readonly string[] = ["approve", "request-changes", "comment"];
 
 export function ledgerPath(home: string): string {
   return join(home, ".chime", "handoff", "ledger.json");
+}
+
+// Coerce any input into a safe agent slug ([a-z0-9-]); empty falls back.
+export function normalizeAgent(v: unknown, fallback = ""): string {
+  if (typeof v !== "string") return fallback;
+  const s = v
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return s || fallback;
 }
 
 // Fail-soft parse: a hand-edited or absent ledger yields [], never a throw.
@@ -65,11 +82,38 @@ export function nextId(ledger: Entry[], kind: EntryKind): string {
   return `${prefix}${n}`;
 }
 
-// A review verdict advances the proposal it targets. `comment` leaves it open.
+// Single-verdict → status (kept for callers that want the one-vote mapping).
 export function statusFromVerdict(verdict: Verdict): Status {
   if (verdict === "approve") return "accepted";
   if (verdict === "request-changes") return "changes-requested";
   return "open";
+}
+
+export interface Consensus {
+  approve: number;
+  requestChanges: number;
+  comment: number;
+  verdict: Status; // accepted / changes-requested / open, by net of the panel
+  reviewers: Agent[];
+}
+
+// The panel view: tally verdicts across every review of a proposal. Net of
+// approvals over change-requests decides — so 3 approve + 1 request-changes is
+// accepted, and a lone block holds it. This is what lets many agents co-review.
+export function consensus(reviews: Entry[]): Consensus {
+  let approve = 0;
+  let requestChanges = 0;
+  let comment = 0;
+  const reviewers: Agent[] = [];
+  for (const r of reviews) {
+    if (r.verdict === "approve") approve++;
+    else if (r.verdict === "request-changes") requestChanges++;
+    else if (r.verdict === "comment") comment++;
+    reviewers.push(r.from);
+  }
+  const net = approve - requestChanges;
+  const verdict: Status = net > 0 ? "accepted" : net < 0 ? "changes-requested" : "open";
+  return { approve, requestChanges, comment, verdict, reviewers };
 }
 
 function writeLedger(home: string, ledger: Entry[]): void {
@@ -83,15 +127,16 @@ const inputSchema: JsonSchema = {
   properties: {
     action: {
       type: "string",
-      enum: ["propose", "review", "list"],
-      description: "propose = record a change proposal; review = record a verdict about a proposal/PR; list = read the ledger",
+      enum: ["propose", "review", "list", "status"],
+      description: "propose = record a change proposal; review = record a verdict; list = read the ledger; status = one proposal + its review panel & consensus",
     },
+    from: { type: "string", description: "the authoring agent (e.g. claude, codex, deepseek, gemini, chime). Default: chime" },
+    to: { type: "string", description: "the recipient agent, or 'all' to broadcast (default: claude)" },
     title: { type: "string", description: "propose: a one-line title for the change" },
     body: { type: "string", description: "propose/review: rationale or details" },
     target: { type: "array", items: { type: "string" }, description: "propose: files or areas the change touches" },
     ref: { type: "string", description: "propose: a suggested branch name or external reference" },
-    to: { type: "string", enum: ["chime", "claude", "user"], description: "who the entry is for (default: claude)" },
-    about: { type: "string", description: "review: the proposal id (e.g. P1) or PR ref (e.g. PR#4) being reviewed" },
+    about: { type: "string", description: "review/status: the proposal id (e.g. P1) or PR ref (e.g. PR#4)" },
     verdict: { type: "string", enum: ["approve", "request-changes", "comment"], description: "review: the verdict" },
     filter: { type: "string", enum: ["all", "open", "proposal", "review"], description: "list: narrow the entries (default: all)" },
   },
@@ -99,14 +144,12 @@ const inputSchema: JsonSchema = {
   additionalProperties: false,
 };
 
-function toParty(v: unknown, fallback: Party): Party {
-  return typeof v === "string" && PARTIES.includes(v) ? (v as Party) : fallback;
-}
-
 function handler(input: Record<string, unknown>, ctx: HandlerContext): ToolResultPayload {
   const action = String(input.action ?? "");
   const now = ctx.now().toISOString();
   const ledger = readLedger(ctx.home);
+  const from = normalizeAgent(input.from, "chime");
+  const to = normalizeAgent(input.to, "claude");
 
   if (action === "propose") {
     const title = String(input.title ?? "").trim();
@@ -114,8 +157,8 @@ function handler(input: Record<string, unknown>, ctx: HandlerContext): ToolResul
     const entry: Entry = {
       id: nextId(ledger, "proposal"),
       kind: "proposal",
-      from: "chime",
-      to: toParty(input.to, "claude"),
+      from,
+      to,
       title,
       status: "open",
       createdAt: now,
@@ -147,9 +190,9 @@ function handler(input: Record<string, unknown>, ctx: HandlerContext): ToolResul
     const entry: Entry = {
       id: nextId(ledger, "review"),
       kind: "review",
-      from: "chime",
-      to: toParty(input.to, "claude"),
-      title: `review of ${about}: ${verdict}`,
+      from,
+      to,
+      title: `${from} review of ${about}: ${verdict}`,
       about,
       verdict: verdict as Verdict,
       status: "done",
@@ -158,12 +201,15 @@ function handler(input: Record<string, unknown>, ctx: HandlerContext): ToolResul
     const body = String(input.body ?? "").trim();
     if (body) entry.body = body;
 
-    // If the review targets a proposal we hold, advance that proposal's status.
-    let advanced: string | undefined;
+    // A proposal's status is the CONSENSUS of all its reviews (incl. this one),
+    // so many agents can co-review and a single block still holds it.
+    const panel = [...ledger.filter((e) => e.kind === "review" && e.about === about), entry];
+    const verdictOfPanel = consensus(panel).verdict;
+    let advanced: { proposal: string; status: Status; reviewers: Agent[] } | undefined;
     const next = ledger.map((e) => {
       if (e.id === about && e.kind === "proposal") {
-        advanced = statusFromVerdict(verdict as Verdict);
-        return { ...e, status: advanced as Status };
+        advanced = { proposal: about, status: verdictOfPanel, reviewers: consensus(panel).reviewers };
+        return { ...e, status: verdictOfPanel };
       }
       return e;
     });
@@ -173,7 +219,15 @@ function handler(input: Record<string, unknown>, ctx: HandlerContext): ToolResul
     } catch (e) {
       return { ok: false, action, error: `cannot write ledger: ${e instanceof Error ? e.message : String(e)}` };
     }
-    return { ok: true, action, id: entry.id, entry, ...(advanced ? { advanced: { proposal: about, status: advanced } } : {}), path: ledgerPath(ctx.home) };
+    return { ok: true, action, id: entry.id, entry, ...(advanced ? { advanced } : {}), path: ledgerPath(ctx.home) };
+  }
+
+  if (action === "status") {
+    const about = String(input.about ?? "").trim();
+    if (!about) return { ok: false, action, error: "status requires `about` (a proposal id)" };
+    const proposal = ledger.find((e) => e.id === about && e.kind === "proposal") ?? null;
+    const reviews = ledger.filter((e) => e.kind === "review" && e.about === about);
+    return { ok: true, action, about, proposal, reviews, consensus: consensus(reviews) };
   }
 
   if (action === "list") {
@@ -186,13 +240,13 @@ function handler(input: Record<string, unknown>, ctx: HandlerContext): ToolResul
     return { ok: true, action, count: entries.length, entries };
   }
 
-  return { ok: false, action, error: `unknown action: ${action} (expected propose|review|list)` };
+  return { ok: false, action, error: `unknown action: ${action} (expected propose|review|list|status)` };
 }
 
 export const handoff: Capability = {
   name: "handoff",
   description:
-    "The shared Chime⇄Claude handoff ledger — how Chime and Claude Code review each other and pass work back and forth. action=propose records a structured change proposal (Chime never edits code; it proposes, and Claude Code turns an accepted proposal into a real PR). action=review records a verdict (approve / request-changes / comment) about a proposal id or PR ref, advancing the proposal's status. action=list reads the ledger. Call propose when you'd change code but must stay read-only; call review to weigh in on a pending proposal; call list to see what's open. Writes only to Chime's own ~/.chime/handoff/ledger.json, never the user's project code.",
+    "The shared multi-agent handoff ledger — how any agents (claude, codex, deepseek, gemini, chime, …) collaborate cross-platform: propose changes and review each other. action=propose records a structured change proposal (an agent proposes instead of editing code; a coding agent turns an accepted proposal into a real PR). action=review records a verdict (approve / request-changes / comment) about a proposal id or PR ref; a proposal's status reflects the CONSENSUS of all its reviews, so many agents can co-review. action=status shows one proposal with its review panel and consensus. action=list reads the ledger. Every entry has from/to (any agent slug, or to='all' to broadcast). Writes only to Chime's own ~/.chime/handoff/ledger.json, never the user's project code.",
   inputSchema,
   handler,
 };
