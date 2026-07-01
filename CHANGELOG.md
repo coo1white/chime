@@ -13,13 +13,17 @@ The doctor — a universal project health score.
   score with fixes — and makes it language-agnostic and strictly read-only. It
   auto-detects the toolchain (Node, Rust, Python, Go, Ruby) and runs non-mutating
   probes: git hygiene (repo? clean? in sync? stale?), dependency pinning (lockfile?),
-  housekeeping (README, `.gitignore`), committed build artifacts, and whether a fast
-  check gate is wired. Pass `all` for a health board ranked worst-first.
+  housekeeping (README, `.gitignore`, license), committed build artifacts, and whether
+  a fast check gate is wired. Pass `all` for a health board ranked worst-first.
+- **Dogfooding**: after Chime adopted an MIT `LICENSE`, its own doctor gained a
+  matching **license probe** (warn when no `LICENSE`/`COPYING` file defines reuse
+  terms) — the tool now encodes the lesson Chime learned about itself, and running
+  `project_doctor chime` scores Chime a clean **A**.
 - **Implementation**: one `src/tools/project-doctor.ts` + one registry row. Scoring
   and toolchain detection are pure functions; findings are gathered by thin `git`
   read commands and directory listings. Every fix is returned as a next-step command,
   never run.
-- **Tests**: 16 offline tests — pure scoring/grade bands, toolchain detection, each
+- **Tests**: 17 offline tests — pure scoring/grade bands, toolchain detection, each
   probe driven by a fake git, and a real temp-directory diagnosis.
 - **Risk**: low — read-only git/log/ls-files and directory reads; fails closed and
   never mutates.

@@ -90,7 +90,7 @@ sorted worst-first — each carrying the exact next-step command to fix it. The 
 - **git hygiene** — under version control? working tree clean? in sync with upstream
   (ahead / behind)? stale (no commits in 90+ days)?
 - **dependency pinning** — a manifest with no lockfile is a reproducibility hole
-- **housekeeping** — a README and a `.gitignore`
+- **housekeeping** — a README, a `.gitignore`, and a license (reuse terms defined?)
 - **committed build output** — `node_modules`, `dist`, `target`, … shouldn't be tracked
 - **a fast gate** — does the project declare a `check` command Chime can run?
 
