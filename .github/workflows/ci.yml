@@ -1,0 +1,20 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # Native TypeScript (type stripping) is unflagged from Node 22.18+.
+          node-version: "22.18"
+      - run: npm ci
+      - run: npm run check # tsc typecheck (src + test + scripts)
+      - run: npm test # offline node --test suite (no network)
+      - run: npm run smoke:secretary # no-network dispatch smoke
