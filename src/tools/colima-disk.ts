@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import type { Capability, CommandResult, HandlerContext, JsonSchema, ToolResultPayload } from "../types.ts";
 
 // Chime never reimplements the maintenance logic — it shells out to the existing
@@ -58,6 +59,7 @@ const inputSchema: JsonSchema = {
     colimaMaxGb: { type: "number", description: "override CW_COLIMA_MAX_GB (the .colima-size trigger, GB)" },
     confirm: { type: "boolean", description: "compact_run only: must be true before mutating Colima/Docker state" },
     targetGb: { type: "number", description: "compact_run/compact_preview: desired datadisk physical size in GB (default 10)" },
+    planHash: { type: "string", description: "compact_run only: REQUIRED. The exact planHash returned by a prior compact_preview call made with the same targetGb. compact_run recomputes it live and refuses if it does not match — call compact_preview again for a fresh planHash if the datadisk size changed or none was ever obtained." },
     logLines: { type: "number", description: "status only: how many recent log lines to read (default 10)" },
   },
   required: ["action"],
@@ -83,6 +85,28 @@ function shellQuote(s: string): string {
 function targetGb(input: Record<string, unknown>): number {
   const n = Number(input.targetGb);
   return Number.isFinite(n) && n > 0 ? n : 10;
+}
+
+// Deterministic JSON (recursively sorted keys) so the hash is a function of content
+// only. Local copy of the same pattern disk-maintenance.ts / ledger.ts use — not
+// imported, since a colima compaction plan is a different domain from either.
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  const keys = Object.keys(value as Record<string, unknown>).sort();
+  const body = keys.map((k) => `${JSON.stringify(k)}:${stableStringify((value as Record<string, unknown>)[k])}`).join(",");
+  return `{${body}}`;
+}
+
+// A content hash of exactly what compact_run is about to act on: the target size
+// and the datadisk size compact_preview actually observed. compact_preview returns
+// this; compact_run requires it verbatim (recomputed from ITS OWN live "datadisk du"
+// read, not a cached value) before doing anything destructive. Deliberately narrow —
+// excludes colima status / df / raw qemu-img info / docker system df,ps,image ls,
+// volume ls, since those are either purely informational or inherently volatile for
+// reasons unrelated to whether this plan is still the one that was previewed.
+function computeCompactPlanHash(plan: { targetGb: number; currentDatadiskGb: number | undefined }): string {
+  return `sha256:${createHash("sha256").update(stableStringify(plan)).digest("hex")}`;
 }
 
 function run(
@@ -120,6 +144,11 @@ function parseFirstSizeGb(text: string): number | undefined {
 function parseMarkedSizeGb(text: string, marker: string): number | undefined {
   const line = text.split("\n").find((l) => l.includes(marker));
   return line ? parseFirstSizeGb(line) : undefined;
+}
+
+function parseMarkerRc(text: string, marker: string): number | undefined {
+  const m = text.match(new RegExp(`${marker}=(\\d+)`));
+  return m ? Number(m[1]) : undefined;
 }
 
 function compactPlan(): string[] {
@@ -164,6 +193,7 @@ function compactPreview(input: Record<string, unknown>, ctx: HandlerContext): To
   ];
   const missing = steps.slice(0, 3).filter((s) => !okStep(s)).map((s) => s.label.replace("which ", ""));
   const currentDatadiskGb = parseFirstSizeGb(steps.find((s) => s.label === "datadisk du")?.result.stdout ?? "");
+  const planHash = computeCompactPlanHash({ targetGb: target, currentDatadiskGb });
   return {
     ok: missing.length === 0,
     action: "compact_preview",
@@ -172,6 +202,7 @@ function compactPreview(input: Record<string, unknown>, ctx: HandlerContext): To
     datadisk: disk,
     dockerHost: host,
     currentDatadiskGb,
+    planHash,
     needsDeepCompact: currentDatadiskGb === undefined ? undefined : currentDatadiskGb > target,
     preserves: ["running containers", "images used by running containers", "Docker volumes"],
     removes: ["Docker build cache", "unused Docker images"],
@@ -200,14 +231,28 @@ function fail(action: string, step: { label: string; result: CommandResult }, ex
 
 function compactRun(input: Record<string, unknown>, ctx: HandlerContext): ToolResultPayload {
   const action = "compact_run";
-  if (input.confirm !== true) {
-    return { ok: false, action, error: "compact_run mutates Docker/Colima state; call again with confirm: true after compact_preview" };
-  }
-
   const disk = datadiskPath(ctx.home);
   const target = targetGb(input);
   if (!existsSync(disk)) {
     return { ok: false, action, targetGb: target, datadisk: disk, error: "Colima raw datadisk not found; nothing changed" };
+  }
+  if (input.confirm !== true) {
+    return { ok: false, action, targetGb: target, datadisk: disk, error: "compact_run mutates Docker/Colima state; call again with confirm: true after compact_preview" };
+  }
+
+  // planHash is proof a real compact_preview happened, not just a rubber-stamped
+  // boolean: recompute it here from a LIVE "datadisk du" read (not a cached value)
+  // and require an exact match before anything destructive runs — same fail-closed,
+  // no-partial-match discipline as disk-maintenance.ts's run gate.
+  const duCheck = run(ctx, "datadisk du", "du", ["-h", disk], 30_000);
+  const currentDatadiskGb = parseFirstSizeGb(duCheck.result.stdout);
+  const suppliedHash = typeof input.planHash === "string" ? input.planHash : "";
+  const livePlanHash = computeCompactPlanHash({ targetGb: target, currentDatadiskGb });
+  if (!suppliedHash) {
+    return { ok: false, action, targetGb: target, datadisk: disk, currentDatadiskGb, error: "compact_run requires planHash from a prior compact_preview call — call compact_preview first, then pass its planHash to compact_run" };
+  }
+  if (suppliedHash !== livePlanHash) {
+    return { ok: false, action, targetGb: target, datadisk: disk, currentDatadiskGb, error: "planHash does not match the current datadisk state (size changed since preview, or wrong target/hash supplied) — call compact_preview again for a fresh planHash" };
   }
 
   const stamp = ctx.now().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
@@ -215,7 +260,7 @@ function compactRun(input: Record<string, unknown>, ctx: HandlerContext): ToolRe
   const host = dockerHost(ctx.home);
   const compacted = `${disk}.compacted`;
   const rollback = `${disk}.before-final-compact-${stamp}`;
-  const steps: Array<{ label: string; cmd: string; args: string[]; result: CommandResult }> = [];
+  const steps: Array<{ label: string; cmd: string; args: string[]; result: CommandResult }> = [duCheck];
 
   const preflight = [
     run(ctx, "which colima", "which", ["colima"], 10_000),
@@ -257,12 +302,27 @@ function compactRun(input: Record<string, unknown>, ctx: HandlerContext): ToolRe
       "--",
       "sh",
       "-lc",
-      "sudo dd if=/dev/zero of=/var/lib/docker/.zero-fill bs=64M status=progress; echo dd_rc=$?; sync; sudo rm -f /var/lib/docker/.zero-fill; sync; exit 0",
+      "sudo dd if=/dev/zero of=/var/lib/docker/.zero-fill bs=64M status=progress; echo DD_RC=$?; sync; sudo rm -f /var/lib/docker/.zero-fill; echo RM_RC=$?; sync",
     ],
     1_800_000,
   );
   steps.push(zero);
   if (!okStep(zero)) return fail(action, zero, { targetGb: target, backupDir: backup, datadisk: disk, steps: steps.map((s) => s.label) });
+  // dd is EXPECTED to fail with ENOSPC once it fills all free space — that's the
+  // whole point of this step, so DD_RC is intentionally never checked. What must
+  // never be silently lost is a failure of the rm -f cleanup: if that fails, a
+  // large temp file is left behind consuming exactly the space this operation
+  // exists to reclaim.
+  const zeroRmRc = parseMarkerRc(output(zero), "RM_RC");
+  if (zeroRmRc !== 0) {
+    return fail(action, zero, {
+      targetGb: target,
+      backupDir: backup,
+      datadisk: disk,
+      steps: steps.map((s) => s.label),
+      error: `zero-fill cleanup (rm -f .zero-fill inside the VM) failed with exit ${zeroRmRc ?? "unknown"} — a large temp file may remain in /var/lib/docker; ssh in and remove /var/lib/docker/.zero-fill manually before retrying`,
+    });
+  }
 
   const stop = run(ctx, "stop Colima", "colima", ["stop"], 300_000);
   steps.push(stop);
@@ -408,7 +468,7 @@ function handler(input: Record<string, unknown>, ctx: HandlerContext): ToolResul
 export const colimaDisk: Capability = {
   name: "colima_disk",
   description:
-    "Check or reclaim disk space used by the user's Docker/Colima VM. Call this when the user asks about disk space, Docker/Colima size, cleanup, or deep compaction. action=status reads the latest maintenance result; preview/run use the light safe cleanup; compact_preview plans the deep raw-datadisk compaction read-only; compact_run requires confirm:true and deletes only regenerable build cache + unused images before sparse-compacting the Colima datadisk.",
+    "Check or reclaim disk space used by the user's Docker/Colima VM. Call this when the user asks about disk space, Docker/Colima size, cleanup, or deep compaction. action=status reads the latest maintenance result; preview/run use the light safe cleanup; compact_preview plans the deep raw-datadisk compaction read-only and returns a planHash; compact_run requires confirm:true AND that exact planHash from a prior compact_preview call, and deletes only regenerable build cache + unused images before sparse-compacting the Colima datadisk. If the datadisk size changed since the preview (or the hash is missing/wrong), compact_run is refused and you must call compact_preview again.",
   inputSchema,
   handler,
 };

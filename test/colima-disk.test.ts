@@ -131,6 +131,48 @@ test("compact_run: requires explicit confirmation", async () => {
   }
 });
 
+test("compact_run: requires planHash proving a preview happened", async () => {
+  const home = homeWithDatadisk();
+  try {
+    const { ctx, calls } = fakeCtx(home, (cmd) => {
+      if (cmd === "du") return ok("32G\t/x/datadisk\n");
+      return ok();
+    });
+    const r = await colimaDisk.handler({ action: "compact_run", confirm: true }, ctx);
+    assert.equal(r.ok, false);
+    assert.match(String(r.error), /planHash/);
+    assert.equal(calls.some((c) => c.cmd === "colima" && c.args[0] === "stop"), false);
+    assert.equal(calls.some((c) => c.cmd === "docker"), false);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("compact_run: stale planHash after datadisk size changed is refused", async () => {
+  const home = homeWithDatadisk();
+  try {
+    let duGb = "32G";
+    const { ctx, calls } = fakeCtx(home, (cmd, args) => {
+      if (cmd === "which") return ok(`/opt/homebrew/bin/${args[0]}\n`);
+      if (cmd === "du") return ok(`${duGb}\t${args[1]}\n`);
+      return ok();
+    });
+    const preview = await colimaDisk.handler({ action: "compact_preview", targetGb: 10 }, ctx);
+    assert.equal(preview.ok, true);
+    const staleHash = preview.planHash as string;
+
+    // Datadisk size changes between preview and run (e.g. unrelated Docker activity).
+    duGb = "40G";
+
+    const r = await colimaDisk.handler({ action: "compact_run", confirm: true, planHash: staleHash, targetGb: 10 }, ctx);
+    assert.equal(r.ok, false);
+    assert.match(String(r.error), /planHash does not match|compact_preview again/);
+    assert.equal(calls.some((c) => c.cmd === "colima" && c.args[0] === "stop"), false);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("compact_run: successful deep compaction sequence preserves volumes", async () => {
   const home = homeWithDatadisk();
   const now = () => new Date("2026-07-02T10:45:58.000Z");
@@ -142,7 +184,7 @@ test("compact_run: successful deep compaction sequence preserves volumes", async
         if (cmd === "which") return ok(`/opt/homebrew/bin/${args[0]}\n`);
         if (cmd === "docker" && joined === "builder prune -af") return ok("Total: 11.54GB\n");
         if (cmd === "docker" && joined === "image prune -af") return ok("Total reclaimed space: 3.286GB\n");
-        if (cmd === "colima" && joined.startsWith("ssh")) return ok("dd_rc=1\n");
+        if (cmd === "colima" && joined.startsWith("ssh")) return ok("DD_RC=1\nRM_RC=0\n");
         if (cmd === "colima" && joined === "stop") return ok("done\n");
         if (cmd === "colima" && joined === "start") return ok("done\n");
         if (cmd === "sh") {
@@ -158,7 +200,8 @@ test("compact_run: successful deep compaction sequence preserves volumes", async
       },
       now,
     );
-    const r = await colimaDisk.handler({ action: "compact_run", confirm: true }, ctx);
+    const preview = await colimaDisk.handler({ action: "compact_preview" }, ctx);
+    const r = await colimaDisk.handler({ action: "compact_run", confirm: true, planHash: preview.planHash }, ctx);
     assert.equal(r.ok, true);
     assert.equal(r.finalDatadiskGb, 8.1);
     assert.equal(r.targetGb, 10);
@@ -177,15 +220,56 @@ test("compact_run: successful deep compaction sequence preserves volumes", async
   }
 });
 
+test("compact_run: zero-fill cleanup failure is detected and fails the step", async () => {
+  const home = homeWithDatadisk();
+  try {
+    const { ctx, calls } = fakeCtx(home, (cmd, args) => {
+      const joined = args.join(" ");
+      if (cmd === "which") return ok();
+      if (cmd === "colima" && joined.startsWith("ssh")) return ok("DD_RC=1\nRM_RC=1\n");
+      return ok();
+    });
+    const preview = await colimaDisk.handler({ action: "compact_preview" }, ctx);
+    const r = await colimaDisk.handler({ action: "compact_run", confirm: true, planHash: preview.planHash }, ctx);
+    assert.equal(r.ok, false);
+    assert.equal(r.failedStep, "zero-fill Docker free space");
+    assert.match(String(r.error), /cleanup.*failed/i);
+    assert.equal(calls.some((c) => c.cmd === "colima" && c.args[0] === "stop"), false);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("compact_run: dd ENOSPC with successful cleanup still proceeds past zero-fill", async () => {
+  const home = homeWithDatadisk();
+  try {
+    const { ctx, calls } = fakeCtx(home, (cmd, args) => {
+      const joined = args.join(" ");
+      if (cmd === "which") return ok();
+      if (cmd === "colima" && joined.startsWith("ssh")) return ok("DD_RC=1\nRM_RC=0\n");
+      if (cmd === "sh" && (args[1] ?? "").includes("qemu-img convert")) return { status: 1, stdout: "", stderr: "convert failed" };
+      return ok();
+    });
+    const preview = await colimaDisk.handler({ action: "compact_preview" }, ctx);
+    const r = await colimaDisk.handler({ action: "compact_run", confirm: true, planHash: preview.planHash }, ctx);
+    assert.equal(r.failedStep, "qemu-img sparse convert");
+    assert.equal(calls.some((c) => c.cmd === "colima" && c.args[0] === "stop"), true);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("compact_run: qemu-img convert failure does not swap datadisk", async () => {
   const home = homeWithDatadisk();
   try {
     const { ctx, calls } = fakeCtx(home, (cmd, args) => {
       if (cmd === "which") return ok();
+      if (cmd === "colima" && args.join(" ").startsWith("ssh")) return ok("DD_RC=1\nRM_RC=0\n");
       if (cmd === "sh" && (args[1] ?? "").includes("qemu-img convert")) return { status: 1, stdout: "", stderr: "convert failed" };
       return ok();
     });
-    const r = await colimaDisk.handler({ action: "compact_run", confirm: true }, ctx);
+    const preview = await colimaDisk.handler({ action: "compact_preview" }, ctx);
+    const r = await colimaDisk.handler({ action: "compact_run", confirm: true, planHash: preview.planHash }, ctx);
     assert.equal(r.ok, false);
     assert.equal(r.failedStep, "qemu-img sparse convert");
     assert.equal(calls.some((c) => c.cmd === "sh" && (c.args[1] ?? "").includes("mv") && (c.args[1] ?? "").includes("before-final-compact")), false);
@@ -200,11 +284,13 @@ test("compact_run: start failure keeps rollback instructions", async () => {
     const { ctx } = fakeCtx(home, (cmd, args) => {
       const script = args[1] ?? "";
       if (cmd === "which") return ok();
+      if (cmd === "colima" && args.join(" ").startsWith("ssh")) return ok("DD_RC=1\nRM_RC=0\n");
       if (cmd === "sh" && script.includes("test -s")) return ok("8.7G\tdatadisk.compacted\n");
       if (cmd === "colima" && args.join(" ") === "start") return { status: 1, stdout: "", stderr: "boot failed" };
       return ok();
     });
-    const r = await colimaDisk.handler({ action: "compact_run", confirm: true }, ctx);
+    const preview = await colimaDisk.handler({ action: "compact_preview" }, ctx);
+    const r = await colimaDisk.handler({ action: "compact_run", confirm: true, planHash: preview.planHash }, ctx);
     assert.equal(r.ok, false);
     assert.equal(r.failedStep, "start Colima");
     assert.match(String(r.rollbackPath), /datadisk\.before-final-compact/);
@@ -220,11 +306,13 @@ test("compact_run: over-target compacted disk is not reported as success", async
     const { ctx, calls } = fakeCtx(home, (cmd, args) => {
       const script = args[1] ?? "";
       if (cmd === "which") return ok();
+      if (cmd === "colima" && args.join(" ").startsWith("ssh")) return ok("DD_RC=1\nRM_RC=0\n");
       if (cmd === "sh" && script.includes("test -s")) return ok("12G\tdatadisk.compacted\n");
       if (cmd === "sh" && script.includes("DATADISK_DU")) return ok("DATADISK_DU 12G\t/home/x/.colima/_lima/_disks/colima/datadisk\n");
       return ok();
     });
-    const r = await colimaDisk.handler({ action: "compact_run", confirm: true, targetGb: 10 }, ctx);
+    const preview = await colimaDisk.handler({ action: "compact_preview", targetGb: 10 }, ctx);
+    const r = await colimaDisk.handler({ action: "compact_run", confirm: true, targetGb: 10, planHash: preview.planHash }, ctx);
     assert.equal(r.ok, false);
     assert.equal(r.finalDatadiskGb, 12);
     assert.match(String(r.error), /did not reach target/);
