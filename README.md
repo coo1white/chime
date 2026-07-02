@@ -6,7 +6,8 @@ Zero runtime dependencies — TypeScript on Node, the model APIs over native `fe
 (no SDK).
 
 Chime manages the Docker/Colima VM's disk (a front door to the
-[`colima-disk-maintenance`](../colima-disk-maintenance) launchd job) and acts as a
+[`colima-disk-maintenance`](../colima-disk-maintenance) launchd job, plus an
+opt-in deep Colima datadisk compactor) and acts as a
 **read-only secretary** over every project under `~/Developer` — it knows each repo,
 reports live git/version state, runs each repo's own fast check, and pings the
 deployed ones. More tools are added one module at a time.
@@ -47,11 +48,31 @@ project first. (No `npm link`? use `npm start`.)
 ```
 chime> how's my disk space?
 chime> preview a docker cleanup
+chime> preview deep colima compaction
 chime> exit
 ```
 
 It prefers a read-only **status** or a **preview** (dry-run) before anything that
 changes state, and explains what it ran.
+
+### Colima disk maintenance
+
+`colima_disk` has two levels:
+
+- **Light cleanup**: `status`, `preview`, and `run` keep using the existing
+  `colima-disk-maintenance` path for safe reclaim work such as dangling-image cleanup
+  and `fstrim`.
+- **Deep compaction**: `compact_preview` inspects the Colima raw datadisk and Docker
+  state without changing anything. `compact_run` requires `confirm: true`, saves Docker
+  manifests under `~/.chime/colima-compact/<timestamp>/`, deletes only regenerable
+  Docker build cache and unused images, zero-fills free space, sparse-compacts
+  `~/.colima/_lima/_disks/colima/datadisk` with `qemu-img`, then starts Colima and
+  verifies containers, volumes, Docker space, and the final datadisk size before
+  deleting the rollback disk.
+
+Deep compaction preserves running containers, the images they use, and Docker volumes.
+It does not shrink the datadisk's logical 100G capacity; it reduces the host-side
+physical space used by the sparse raw file.
 
 ## Project secretary
 
