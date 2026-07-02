@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Capability, HandlerContext, JsonSchema, ToolResultPayload } from "../types.ts";
+import type { Capability, CommandResult, HandlerContext, JsonSchema, ToolResultPayload } from "../types.ts";
 
 // Chime never reimplements the maintenance logic — it shells out to the existing
 // colima-disk-maintenance script and reads its log. The .sh stays the source of truth.
@@ -50,20 +50,303 @@ const inputSchema: JsonSchema = {
   properties: {
     action: {
       type: "string",
-      enum: ["run", "preview", "status"],
+      enum: ["run", "preview", "status", "compact_preview", "compact_run"],
       description:
-        "run = reclaim space now (safe: dangling images + fstrim); preview = dry-run that changes nothing; status = read the most recent result from the log",
+        "run = light reclaim now (safe: dangling images + fstrim); preview = light dry-run; status = read the latest log; compact_preview = read-only deep compaction plan; compact_run = confirmed deep compaction",
     },
     freeMinGb: { type: "number", description: "override CW_FREE_MIN_GB (the free-space trigger, GB)" },
     colimaMaxGb: { type: "number", description: "override CW_COLIMA_MAX_GB (the .colima-size trigger, GB)" },
+    confirm: { type: "boolean", description: "compact_run only: must be true before mutating Colima/Docker state" },
+    targetGb: { type: "number", description: "compact_run/compact_preview: desired datadisk physical size in GB (default 10)" },
     logLines: { type: "number", description: "status only: how many recent log lines to read (default 10)" },
   },
   required: ["action"],
   additionalProperties: false,
 };
 
+function datadiskPath(home: string): string {
+  return join(home, ".colima", "_lima", "_disks", "colima", "datadisk");
+}
+
+function dockerHost(home: string): string {
+  return `unix://${join(home, ".colima", "default", "docker.sock")}`;
+}
+
+function compactBackupDir(home: string, stamp: string): string {
+  return join(home, ".chime", "colima-compact", stamp);
+}
+
+function shellQuote(s: string): string {
+  return `'${s.replaceAll("'", "'\\''")}'`;
+}
+
+function targetGb(input: Record<string, unknown>): number {
+  const n = Number(input.targetGb);
+  return Number.isFinite(n) && n > 0 ? n : 10;
+}
+
+function run(
+  ctx: HandlerContext,
+  label: string,
+  cmd: string,
+  args: string[],
+  timeoutMs = 300_000,
+  env?: Record<string, string | undefined>,
+): { label: string; cmd: string; args: string[]; result: CommandResult } {
+  return { label, cmd, args, result: ctx.runCommand(cmd, args, { timeoutMs, env }) };
+}
+
+function okStep(step: { result: CommandResult }): boolean {
+  return step.result.status === 0 && !step.result.error;
+}
+
+function output(step: { result: CommandResult }): string {
+  return `${step.result.stdout}\n${step.result.stderr}`.trim();
+}
+
+function parseFirstSizeGb(text: string): number | undefined {
+  const m = text.match(/([\d.]+)\s*([KMGT])i?B?/i);
+  if (!m) return undefined;
+  const n = Number(m[1]);
+  if (!Number.isFinite(n)) return undefined;
+  const unit = m[2]!.toUpperCase();
+  if (unit === "K") return n / 1024 / 1024;
+  if (unit === "M") return n / 1024;
+  if (unit === "G") return n;
+  if (unit === "T") return n * 1024;
+  return undefined;
+}
+
+function parseMarkedSizeGb(text: string, marker: string): number | undefined {
+  const line = text.split("\n").find((l) => l.includes(marker));
+  return line ? parseFirstSizeGb(line) : undefined;
+}
+
+function compactPlan(): string[] {
+  return [
+    "save Docker container/image/volume/system-df manifests under ~/.chime/colima-compact/<timestamp>",
+    "delete regenerable Docker build cache with docker builder prune -af",
+    "delete unused images with docker image prune -af; keep volumes and images used by running containers",
+    "zero-fill free space inside /var/lib/docker, then remove the temporary file",
+    "stop Colima and qemu-img convert the raw datadisk into a sparse compacted file",
+    "swap the compacted datadisk into place while retaining the old disk as a rollback file",
+    "start Colima, verify Docker/containers/volumes/datadisk size, then delete rollback only on success",
+  ];
+}
+
+function compactPreview(input: Record<string, unknown>, ctx: HandlerContext): ToolResultPayload {
+  const disk = datadiskPath(ctx.home);
+  const target = targetGb(input);
+  const host = dockerHost(ctx.home);
+  if (!existsSync(disk)) {
+    return {
+      ok: true,
+      action: "compact_preview",
+      applicable: false,
+      targetGb: target,
+      datadisk: disk,
+      error: "Colima raw datadisk not found; this deep compaction path only supports macOS Colima raw datadisk",
+    };
+  }
+
+  const steps = [
+    run(ctx, "which colima", "which", ["colima"], 10_000),
+    run(ctx, "which docker", "which", ["docker"], 10_000),
+    run(ctx, "which qemu-img", "which", ["qemu-img"], 10_000),
+    run(ctx, "colima status", "colima", ["status"], 30_000),
+    run(ctx, "data volume df", "df", ["-h", "/System/Volumes/Data"], 10_000),
+    run(ctx, "datadisk du", "du", ["-h", disk], 30_000),
+    run(ctx, "datadisk qemu-img info", "qemu-img", ["info", disk], 30_000),
+    run(ctx, "docker system df", "docker", ["system", "df"], 30_000, { DOCKER_HOST: host }),
+    run(ctx, "docker ps -a", "docker", ["ps", "-a"], 30_000, { DOCKER_HOST: host }),
+    run(ctx, "docker image ls", "docker", ["image", "ls", "--digests"], 30_000, { DOCKER_HOST: host }),
+    run(ctx, "docker volume ls", "docker", ["volume", "ls"], 30_000, { DOCKER_HOST: host }),
+  ];
+  const missing = steps.slice(0, 3).filter((s) => !okStep(s)).map((s) => s.label.replace("which ", ""));
+  const currentDatadiskGb = parseFirstSizeGb(steps.find((s) => s.label === "datadisk du")?.result.stdout ?? "");
+  return {
+    ok: missing.length === 0,
+    action: "compact_preview",
+    applicable: missing.length === 0,
+    targetGb: target,
+    datadisk: disk,
+    dockerHost: host,
+    currentDatadiskGb,
+    needsDeepCompact: currentDatadiskGb === undefined ? undefined : currentDatadiskGb > target,
+    preserves: ["running containers", "images used by running containers", "Docker volumes"],
+    removes: ["Docker build cache", "unused Docker images"],
+    plannedSteps: compactPlan(),
+    checks: steps.map((s) => ({ label: s.label, ok: okStep(s), exitCode: s.result.status, stdout: s.result.stdout.trim(), stderr: s.result.stderr.trim(), error: s.result.error })),
+    error: missing.length > 0 ? `missing required command(s): ${missing.join(", ")}` : undefined,
+  };
+}
+
+function sh(ctx: HandlerContext, label: string, script: string, timeoutMs = 300_000): { label: string; cmd: string; args: string[]; result: CommandResult } {
+  return run(ctx, label, "sh", ["-lc", script], timeoutMs);
+}
+
+function fail(action: string, step: { label: string; result: CommandResult }, extra: Record<string, unknown> = {}): ToolResultPayload {
+  return {
+    ok: false,
+    action,
+    failedStep: step.label,
+    exitCode: step.result.status,
+    stdout: step.result.stdout.trim(),
+    stderr: step.result.stderr.trim(),
+    error: step.result.error || lastNonEmpty((step.result.stderr || step.result.stdout).split("\n")) || `${step.label} failed`,
+    ...extra,
+  };
+}
+
+function compactRun(input: Record<string, unknown>, ctx: HandlerContext): ToolResultPayload {
+  const action = "compact_run";
+  if (input.confirm !== true) {
+    return { ok: false, action, error: "compact_run mutates Docker/Colima state; call again with confirm: true after compact_preview" };
+  }
+
+  const disk = datadiskPath(ctx.home);
+  const target = targetGb(input);
+  if (!existsSync(disk)) {
+    return { ok: false, action, targetGb: target, datadisk: disk, error: "Colima raw datadisk not found; nothing changed" };
+  }
+
+  const stamp = ctx.now().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+  const backup = compactBackupDir(ctx.home, stamp);
+  const host = dockerHost(ctx.home);
+  const compacted = `${disk}.compacted`;
+  const rollback = `${disk}.before-final-compact-${stamp}`;
+  const steps: Array<{ label: string; cmd: string; args: string[]; result: CommandResult }> = [];
+
+  const preflight = [
+    run(ctx, "which colima", "which", ["colima"], 10_000),
+    run(ctx, "which docker", "which", ["docker"], 10_000),
+    run(ctx, "which qemu-img", "which", ["qemu-img"], 10_000),
+  ];
+  steps.push(...preflight);
+  const missing = preflight.filter((s) => !okStep(s)).map((s) => s.label.replace("which ", ""));
+  if (missing.length > 0) return { ok: false, action, targetGb: target, datadisk: disk, steps: steps.map((s) => s.label), error: `missing required command(s): ${missing.join(", ")}` };
+
+  const save = sh(
+    ctx,
+    "save safety manifests",
+    [
+      `mkdir -p ${shellQuote(backup)}`,
+      `DOCKER_HOST=${shellQuote(host)} docker ps -a > ${shellQuote(join(backup, "docker-ps-a.txt"))}`,
+      `DOCKER_HOST=${shellQuote(host)} docker image ls --digests > ${shellQuote(join(backup, "docker-images.txt"))}`,
+      `DOCKER_HOST=${shellQuote(host)} docker volume ls > ${shellQuote(join(backup, "docker-volumes.txt"))}`,
+      `DOCKER_HOST=${shellQuote(host)} docker system df -v > ${shellQuote(join(backup, "docker-system-df-before.txt"))}`,
+    ].join("\n"),
+  );
+  steps.push(save);
+  if (!okStep(save)) return fail(action, save, { targetGb: target, backupDir: backup, datadisk: disk, steps: steps.map((s) => s.label) });
+
+  for (const step of [
+    run(ctx, "prune Docker build cache", "docker", ["builder", "prune", "-af"], 900_000, { DOCKER_HOST: host }),
+    run(ctx, "prune unused Docker images", "docker", ["image", "prune", "-af"], 900_000, { DOCKER_HOST: host }),
+  ]) {
+    steps.push(step);
+    if (!okStep(step)) return fail(action, step, { targetGb: target, backupDir: backup, datadisk: disk, steps: steps.map((s) => s.label) });
+  }
+
+  const zero = run(
+    ctx,
+    "zero-fill Docker free space",
+    "colima",
+    [
+      "ssh",
+      "--",
+      "sh",
+      "-lc",
+      "sudo dd if=/dev/zero of=/var/lib/docker/.zero-fill bs=64M status=progress; echo dd_rc=$?; sync; sudo rm -f /var/lib/docker/.zero-fill; sync; exit 0",
+    ],
+    1_800_000,
+  );
+  steps.push(zero);
+  if (!okStep(zero)) return fail(action, zero, { targetGb: target, backupDir: backup, datadisk: disk, steps: steps.map((s) => s.label) });
+
+  const stop = run(ctx, "stop Colima", "colima", ["stop"], 300_000);
+  steps.push(stop);
+  if (!okStep(stop)) return fail(action, stop, { targetGb: target, backupDir: backup, datadisk: disk, steps: steps.map((s) => s.label) });
+
+  const convert = sh(
+    ctx,
+    "qemu-img sparse convert",
+    `rm -f ${shellQuote(compacted)}\nqemu-img convert -p -O raw -S 4k ${shellQuote(disk)} ${shellQuote(compacted)}`,
+    3_600_000,
+  );
+  steps.push(convert);
+  if (!okStep(convert)) return fail(action, convert, { targetGb: target, backupDir: backup, datadisk: disk, rollbackPath: rollback, steps: steps.map((s) => s.label) });
+
+  const inspect = sh(ctx, "inspect compacted datadisk", `test -s ${shellQuote(compacted)}\ndu -h ${shellQuote(compacted)}\nqemu-img info ${shellQuote(compacted)}`, 60_000);
+  steps.push(inspect);
+  if (!okStep(inspect)) return fail(action, inspect, { targetGb: target, backupDir: backup, datadisk: disk, rollbackPath: rollback, steps: steps.map((s) => s.label) });
+
+  const compactedGb = parseFirstSizeGb(inspect.result.stdout);
+  const swap = sh(ctx, "swap compacted datadisk", `mv ${shellQuote(disk)} ${shellQuote(rollback)}\nmv ${shellQuote(compacted)} ${shellQuote(disk)}`, 60_000);
+  steps.push(swap);
+  if (!okStep(swap)) return fail(action, swap, { targetGb: target, backupDir: backup, datadisk: disk, rollbackPath: rollback, steps: steps.map((s) => s.label) });
+
+  const start = run(ctx, "start Colima", "colima", ["start"], 600_000);
+  steps.push(start);
+  if (!okStep(start)) return fail(action, start, { targetGb: target, backupDir: backup, datadisk: disk, rollbackPath: rollback, rollback: `colima stop; mv ${rollback} ${disk}; colima start`, steps: steps.map((s) => s.label) });
+
+  const verify = sh(
+    ctx,
+    "verify compacted Colima",
+    [
+      `DOCKER_HOST=${shellQuote(host)} docker ps -a`,
+      `DOCKER_HOST=${shellQuote(host)} docker volume ls`,
+      `DOCKER_HOST=${shellQuote(host)} docker system df`,
+      "colima ssh -- df -h /var/lib/docker",
+      "colima ssh -- sudo du -shx /var/lib/docker",
+      `printf 'DATADISK_DU ' && du -h ${shellQuote(disk)}`,
+      `qemu-img info ${shellQuote(disk)}`,
+    ].join("\n"),
+    300_000,
+  );
+  steps.push(verify);
+  if (!okStep(verify)) return fail(action, verify, { targetGb: target, backupDir: backup, datadisk: disk, rollbackPath: rollback, rollback: `colima stop; mv ${rollback} ${disk}; colima start`, steps: steps.map((s) => s.label) });
+
+  const finalDatadiskGb = parseMarkedSizeGb(verify.result.stdout, "DATADISK_DU");
+  const sizeOk = finalDatadiskGb !== undefined && finalDatadiskGb <= target;
+  if (!sizeOk) {
+    return {
+      ok: false,
+      action,
+      targetGb: target,
+      finalDatadiskGb,
+      backupDir: backup,
+      datadisk: disk,
+      rollbackPath: rollback,
+      rollback: `colima stop; mv ${rollback} ${disk}; colima start`,
+      steps: steps.map((s) => s.label),
+      error: `compacted datadisk did not reach target <= ${target}GB`,
+    };
+  }
+
+  const cleanup = sh(ctx, "delete verified rollback datadisk", `rm -f ${shellQuote(rollback)}`, 120_000);
+  steps.push(cleanup);
+  if (!okStep(cleanup)) return fail(action, cleanup, { targetGb: target, finalDatadiskGb, backupDir: backup, datadisk: disk, rollbackPath: rollback, steps: steps.map((s) => s.label) });
+
+  return {
+    ok: true,
+    action,
+    targetGb: target,
+    finalDatadiskGb,
+    compactedGb,
+    backupDir: backup,
+    datadisk: disk,
+    preserved: ["running containers", "images used by running containers", "Docker volumes"],
+    removed: ["Docker build cache", "unused Docker images", "verified rollback datadisk"],
+    steps: steps.map((s) => ({ label: s.label, ok: okStep(s), exitCode: s.result.status, summary: lastNonEmpty(output(s).split("\n")) })),
+  };
+}
+
 function handler(input: Record<string, unknown>, ctx: HandlerContext): ToolResultPayload {
   const action = String(input.action ?? "");
+
+  if (action === "compact_preview") return compactPreview(input, ctx);
+  if (action === "compact_run") return compactRun(input, ctx);
 
   if (action === "status") {
     const path = logPath(ctx.home);
@@ -90,7 +373,7 @@ function handler(input: Record<string, unknown>, ctx: HandlerContext): ToolResul
   }
 
   if (action !== "run" && action !== "preview") {
-    return { ok: false, action, error: `unknown action: ${action} (expected run|preview|status)` };
+    return { ok: false, action, error: `unknown action: ${action} (expected run|preview|status|compact_preview|compact_run)` };
   }
 
   const env: Record<string, string | undefined> = {};
@@ -125,7 +408,7 @@ function handler(input: Record<string, unknown>, ctx: HandlerContext): ToolResul
 export const colimaDisk: Capability = {
   name: "colima_disk",
   description:
-    "Check or reclaim disk space used by the user's Docker/Colima VM. Call this when the user asks about disk space, Docker/Colima size, or wants to clean up / free space. action=status reads the most recent maintenance result (read-only); action=preview dry-runs the cleanup and reports what it WOULD do without changing anything; action=run reclaims now (safe: dangling images + fstrim only).",
+    "Check or reclaim disk space used by the user's Docker/Colima VM. Call this when the user asks about disk space, Docker/Colima size, cleanup, or deep compaction. action=status reads the latest maintenance result; preview/run use the light safe cleanup; compact_preview plans the deep raw-datadisk compaction read-only; compact_run requires confirm:true and deletes only regenerable build cache + unused images before sparse-compacting the Colima datadisk.",
   inputSchema,
   handler,
 };
