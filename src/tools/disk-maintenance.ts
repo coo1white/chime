@@ -1,5 +1,6 @@
-import { existsSync, rmSync, readdirSync, statSync } from "node:fs";
+import { existsSync, rmSync, readdirSync, statSync, lstatSync } from "node:fs";
 import { basename, dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
+import { createHash } from "node:crypto";
 import type { Capability, HandlerContext, JsonSchema, ToolResultPayload } from "../types.ts";
 import { colimaDisk } from "./colima-disk.ts";
 
@@ -52,6 +53,7 @@ const inputSchema: JsonSchema = {
     minAgeDays: { type: "number", description: "minimum age for cold files/build dirs (default 30)" },
     minSizeMb: { type: "number", description: "minimum size for cold-file compression candidates (default 100)" },
     roots: { type: "array", items: { type: "string" }, description: "compression scan roots under the user's home" },
+    planHash: { type: "string", description: "REQUIRED for action:run. The exact planHash returned by a preview or scan call made with the same task/includeProjectBuilds/minAgeDays/minSizeMb/roots. Proves the caller reviewed the real candidate list before anything is deleted. If the filesystem changed since that preview, the hash will not match and run is refused — call preview again for a fresh planHash." },
   },
   required: ["action"],
   additionalProperties: false,
@@ -69,7 +71,21 @@ function expandRoot(home: string, raw: string): string {
   return isAbsolute(raw) ? raw : join(home, raw);
 }
 
+// lstat (not stat) so a symlink is reported as itself, never followed. Every place
+// this tool walks a directory or is handed a candidate path must check this first —
+// underHome()/hasDangerSegment() only validate the caller-supplied root strings, so a
+// symlink discovered mid-recursion is the one way a path can be lexically "under
+// home" while resolving somewhere else entirely.
+function isSymlink(path: string): boolean {
+  try {
+    return lstatSync(path).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
 function sizeBytes(path: string): number {
+  if (isSymlink(path)) return 0;
   const s = statSync(path);
   if (!s.isDirectory()) return s.size;
   let total = 0;
@@ -88,17 +104,31 @@ function safeSizeMb(path: string): number {
   }
 }
 
-function ageDays(path: string, now: Date): number {
+// A directory's own mtime only changes when a direct child is added/removed/renamed
+// (POSIX semantics) — writing into a file deep inside does not bump it. So staleness
+// for a build dir must be judged by the newest mtime found anywhere inside it, not
+// the directory's own, or an actively-used node_modules/dist can look stale and get
+// deleted. Mirrors sizeBytes()'s recursion shape; skips symlinks the same way.
+function newestMtimeMs(path: string): number {
   try {
-    return Math.floor((now.getTime() - statSync(path).mtimeMs) / 86_400_000);
+    if (isSymlink(path)) return 0;
+    const s = statSync(path);
+    if (!s.isDirectory()) return s.mtimeMs;
+    let newest = s.mtimeMs;
+    for (const e of readdirSync(path)) newest = Math.max(newest, newestMtimeMs(join(path, e)));
+    return newest;
   } catch {
     return 0;
   }
 }
 
+// Any dotfile/dot-directory segment is protected (.ssh, .aws, .config, .docker,
+// .kube, .gnupg, .git, .colima, .env*, ...) — one general rule instead of an
+// enumerated list that inevitably misses something. `.app` check is case-insensitive
+// since macOS treats Foo.app/Foo.APP as the same bundle for Finder/LaunchServices.
 function hasDangerSegment(path: string): boolean {
   const parts = resolve(path).split(sep);
-  return parts.includes("Library") || parts.includes(".colima") || parts.includes(".git") || parts.some((p) => p.endsWith(".app"));
+  return parts.includes("Library") || parts.some((p) => p.startsWith(".")) || parts.some((p) => p.toLowerCase().endsWith(".app"));
 }
 
 function defaultRoots(home: string): string[] {
@@ -112,7 +142,7 @@ function wantedTask(input: Record<string, unknown>): Task {
 
 function minNumber(input: Record<string, unknown>, key: string, fallback: number): number {
   const n = Number(input[key]);
-  return Number.isFinite(n) && n >= 0 ? n : fallback;
+  return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
 function cacheCandidates(home: string, now: Date, minAgeDays: number, includeProjectBuilds: boolean, skipped: Skipped[]): Candidate[] {
@@ -140,11 +170,15 @@ function cacheCandidates(home: string, now: Date, minAgeDays: number, includePro
   for (const project of readdirSync(dev)) {
     const base = join(dev, project);
     try {
-      if (!statSync(base).isDirectory()) continue;
+      if (isSymlink(base) || !statSync(base).isDirectory()) continue;
       for (const name of readdirSync(base)) {
         if (!BUILD_DIRS.has(name)) continue;
         const path = join(base, name);
-        const days = ageDays(path, now);
+        if (isSymlink(path)) {
+          skipped.push({ path, reason: "symlink (not followed)" });
+          continue;
+        }
+        const days = Math.floor((now.getTime() - newestMtimeMs(path)) / 86_400_000);
         const sizeMb = safeSizeMb(path);
         if (days < minAgeDays || sizeMb <= 0) continue;
         const action = includeProjectBuilds ? "delete old project build output" : "report only (set includeProjectBuilds to delete)";
@@ -166,6 +200,10 @@ function coldCandidates(roots: string[], home: string, now: Date, minAgeDays: nu
     }
     if (hasDangerSegment(path)) {
       skipped.push({ path, reason: "protected path" });
+      return;
+    }
+    if (isSymlink(path)) {
+      skipped.push({ path, reason: "symlink (not followed)" });
       return;
     }
     let s;
@@ -201,8 +239,11 @@ function coldCandidates(roots: string[], home: string, now: Date, minAgeDays: nu
 function normalizedRoots(input: Record<string, unknown>, home: string): { roots: string[]; error?: string } {
   const raw = Array.isArray(input.roots) ? input.roots.map(String) : defaultRoots(home);
   const roots = raw.map((r) => resolve(expandRoot(home, r)));
-  const bad = roots.find((r) => !underHome(home, r));
-  return bad ? { roots, error: `root outside home: ${bad}` } : { roots };
+  // Reject the bare home directory itself as a root — the single broadest,
+  // most-surprising invocation (roots:["~"]) — while still allowing any named
+  // subdirectory under home (roots stays a documented, user-selectable feature).
+  const bad = roots.find((r) => !underHome(home, r) || r === resolve(home));
+  return bad ? { roots, error: `root not permitted: ${bad}` } : { roots };
 }
 
 function available(ctx: HandlerContext, cmd: string): boolean {
@@ -232,6 +273,45 @@ function commandStrings(): string[] {
   return CACHE_COMMANDS.map((c) => c.label);
 }
 
+// Deterministic JSON (recursively sorted keys) so the hash is a function of content
+// only. Deliberately a small LOCAL copy of the same pattern ledger.ts uses for its
+// content-addressed digest — not imported from there, since a disk-maintenance plan
+// is a different domain from a cross-repo ledger entry and shouldn't drag in its
+// from/to/schemaVersion fields.
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  const keys = Object.keys(value as Record<string, unknown>).sort();
+  const body = keys.map((k) => `${JSON.stringify(k)}:${stableStringify((value as Record<string, unknown>)[k])}`).join(",");
+  return `{${body}}`;
+}
+
+interface Plan {
+  task: Task;
+  includeProjectBuilds: boolean;
+  minAgeDays: number;
+  minSizeMb: number;
+  roots: string[];
+  candidates: Candidate[];
+}
+
+// A content hash of exactly what run is about to do. preview/scan return it; run
+// recomputes it fresh (from a LIVE rescan, not a cached value) and requires an exact
+// match before touching anything — this is what turns "call preview first" from a
+// suggestion into something the caller structurally cannot skip: a hash of the real
+// candidate set cannot be produced without the enumeration having actually happened.
+function computePlanHash(plan: Plan): string {
+  const canon = {
+    task: plan.task,
+    includeProjectBuilds: plan.includeProjectBuilds,
+    minAgeDays: plan.minAgeDays,
+    minSizeMb: plan.minSizeMb,
+    roots: [...plan.roots].sort(),
+    candidates: plan.candidates.map((c) => ({ kind: c.kind, path: c.path, sizeMb: c.sizeMb })),
+  };
+  return `sha256:${createHash("sha256").update(stableStringify(canon)).digest("hex")}`;
+}
+
 function handler(input: Record<string, unknown>, ctx: HandlerContext): ToolResultPayload {
   const action = String(input.action ?? "");
   if (!["scan", "preview", "run"].includes(action)) return { ok: false, action, error: "action must be scan, preview, or run" };
@@ -250,9 +330,25 @@ function handler(input: Record<string, unknown>, ctx: HandlerContext): ToolResul
   ];
   const plannedReclaimMb = candidates.reduce((sum, c) => sum + c.sizeMb, 0);
   const commands = [...(task === "all" || task === "clean-dev-cache" ? commandStrings() : []), ...candidates.filter((c) => c.kind === "cold-file").map((c) => c.action)];
+  const planHash = computePlanHash({ task, includeProjectBuilds, minAgeDays, minSizeMb, roots: nr.roots, candidates });
 
   if (action !== "run") {
-    return { ok: true, action, dryRun: action === "preview", scannedRoots: nr.roots, candidates, skipped, plannedReclaimMb, commands };
+    return { ok: true, action, dryRun: action === "preview", scannedRoots: nr.roots, candidates, skipped, plannedReclaimMb, commands, planHash };
+  }
+
+  // run requires the exact planHash from a prior preview/scan of this same plan.
+  // Recomputed above from a LIVE rescan (not a cached value), so a mismatch means
+  // either no preview ever happened, or the filesystem/params drifted since it did —
+  // either way, fail closed and make the caller preview again rather than silently
+  // acting on a plan nobody actually reviewed. Deliberately do not echo the live hash
+  // back here: doing so would let a caller "reject once, read the correct hash off
+  // the error, resubmit," turning the gate into a rubber stamp.
+  const suppliedHash = typeof input.planHash === "string" ? input.planHash : "";
+  if (!suppliedHash) {
+    return { ok: false, action, dryRun: false, scannedRoots: nr.roots, candidates: [], skipped: [], plannedReclaimMb: 0, error: "run requires planHash from a prior preview or scan call — call preview first, then pass its planHash to run" };
+  }
+  if (suppliedHash !== planHash) {
+    return { ok: false, action, dryRun: false, scannedRoots: nr.roots, candidates: [], skipped: [], plannedReclaimMb: 0, error: "planHash does not match the current candidate set (filesystem or params changed since preview, or wrong hash supplied) — call preview again for a fresh planHash" };
   }
 
   const errors: string[] = [];
@@ -288,13 +384,13 @@ function handler(input: Record<string, unknown>, ctx: HandlerContext): ToolResul
     }
   }
 
-  return { ok: errors.length === 0, action, dryRun: false, scannedRoots: nr.roots, candidates, skipped, plannedReclaimMb, reclaimedMb, commands, errors };
+  return { ok: errors.length === 0, action, dryRun: false, scannedRoots: nr.roots, candidates, skipped, plannedReclaimMb, reclaimedMb, commands, errors, planHash };
 }
 
 export const diskMaintenance: Capability = {
   name: "disk_maintenance",
   description:
-    "Safely scan, preview, or run disk maintenance on macOS. It targets regenerate-safe developer caches, delegates Colima cleanup to colima_disk, and compresses only old text-like cold files under user-selected home-directory roots. scan is read-only; preview plans exact actions; run performs only allowlisted cleanup and verified tar.gz archives.",
+    "Safely scan, preview, or run disk maintenance on macOS. It targets regenerate-safe developer caches, delegates Colima cleanup to colima_disk, and compresses only old text-like cold files under user-selected home-directory roots. scan is read-only; preview plans exact actions and returns a planHash; run performs only allowlisted cleanup and verified tar.gz archives, and REQUIRES the planHash from a prior preview or scan call made with identical parameters — call preview first, show the user the exact candidates, then call run with that exact planHash. If anything changed on disk since the preview (or the params differ), run is refused and you must preview again.",
   inputSchema,
   handler,
 };
