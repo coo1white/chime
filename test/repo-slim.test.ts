@@ -215,3 +215,88 @@ test("plan's planHash is stable for the same tree and changes when the file set 
   const c = await repoSlim.handler({ action: "plan", name: "demo" }, ctx(home, ["scripts/dead.sh", "scripts/also-dead.sh"]));
   assert.notEqual(c.planHash, a.planHash);
 });
+
+test("handoff without planHash is refused and proposes nothing", async () => {
+  const { home, repo } = tempHome();
+  write(repo, "scripts/dead.sh", "#!/bin/sh\necho dead\n");
+  const r = await repoSlim.handler({ action: "handoff", name: "demo" }, ctx(home, ["scripts/dead.sh"]));
+  assert.equal(r.ok, false);
+  assert.match(String(r.error), /planHash/);
+  assert.equal(r.proposals, undefined);
+});
+
+test("handoff with a stale planHash after the tree changed is refused, forcing a fresh plan", async () => {
+  const { home, repo } = tempHome();
+  write(repo, "scripts/dead.sh", "#!/bin/sh\necho dead\n");
+  const plan = await repoSlim.handler({ action: "plan", name: "demo" }, ctx(home, ["scripts/dead.sh"]));
+  assert.equal(plan.ok, true);
+  const staleHash = plan.planHash as string;
+
+  write(repo, "scripts/also-dead.sh", "#!/bin/sh\necho also dead\n");
+  const stale = await repoSlim.handler(
+    { action: "handoff", name: "demo", planHash: staleHash },
+    ctx(home, ["scripts/dead.sh", "scripts/also-dead.sh"]),
+  );
+  assert.equal(stale.ok, false);
+  assert.match(String(stale.error), /planHash does not match|plan again/);
+  assert.equal(stale.proposals, undefined);
+
+  // Boring recovery: a fresh plan + its planHash succeeds.
+  const freshPlan = await repoSlim.handler({ action: "plan", name: "demo" }, ctx(home, ["scripts/dead.sh", "scripts/also-dead.sh"]));
+  const freshHandoff = await repoSlim.handler(
+    { action: "handoff", name: "demo", planHash: freshPlan.planHash },
+    ctx(home, ["scripts/dead.sh", "scripts/also-dead.sh"]),
+  );
+  assert.equal(freshHandoff.ok, true);
+});
+
+test("handoff with a matching planHash emits one sealed proposal per non-empty tier, draft by default", async () => {
+  const { home, repo } = tempHome();
+  write(repo, "scripts/dead.sh", "#!/bin/sh\necho dead\n");
+  write(repo, "docs/setup.md", "# Getting Started\n\nOld setup notes.\n");
+  write(repo, "docs/setup-new.md", "# Getting Started\n\nNewer, more complete setup notes.\n");
+  const files = ["scripts/dead.sh", "docs/setup.md", "docs/setup-new.md"];
+
+  const plan = await repoSlim.handler({ action: "plan", name: "demo" }, ctx(home, files));
+  assert.equal(plan.ok, true);
+
+  const r = await repoSlim.handler({ action: "handoff", name: "demo", planHash: plan.planHash }, ctx(home, files));
+  assert.equal(r.ok, true);
+  assert.equal(r.dryRun, true);
+  assert.match(String(r.status), /^draft/);
+
+  const proposals = r.proposals as Record<string, unknown>[];
+  assert.equal(proposals.length, 2);
+  const deleteProposal = proposals.find((p) => String(p.title).includes("delete"))!;
+  const mergeProposal = proposals.find((p) => String(p.title).includes("merge"))!;
+  assert.deepEqual(deleteProposal.targetFiles, ["scripts/dead.sh"]);
+  // Both members of the pair carry the merge verdict (each pairWith-linked to the
+  // other), so the batch's targetFiles covers both files a real merge PR touches.
+  assert.deepEqual(mergeProposal.targetFiles, ["docs/setup.md", "docs/setup-new.md"]);
+  assert.equal(deleteProposal.from, "chime");
+  assert.equal(deleteProposal.to, "cool-workflow");
+  assert.match(String(deleteProposal.id), /^ldg-/);
+  assert.match(String(deleteProposal.rationale), /full test suite/);
+});
+
+test("handoff dryRun:false marks proposals ready-to-relay without sending anything", async () => {
+  const { home, repo } = tempHome();
+  write(repo, "scripts/dead.sh", "#!/bin/sh\necho dead\n");
+  const files = ["scripts/dead.sh"];
+  const plan = await repoSlim.handler({ action: "plan", name: "demo" }, ctx(home, files));
+  const r = await repoSlim.handler({ action: "handoff", name: "demo", planHash: plan.planHash, dryRun: false, from: "chime", to: "cool-workflow" }, ctx(home, files));
+  assert.equal(r.ok, true);
+  assert.equal(r.dryRun, false);
+  assert.match(String(r.status), /^ready-to-relay/);
+});
+
+test("handoff with nothing high-confidence to propose returns an empty proposals array, not an error", async () => {
+  const { home, repo } = tempHome();
+  write(repo, "README.md", "# demo\n");
+  const files = ["README.md"];
+  const plan = await repoSlim.handler({ action: "plan", name: "demo" }, ctx(home, files));
+  const r = await repoSlim.handler({ action: "handoff", name: "demo", planHash: plan.planHash }, ctx(home, files));
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.proposals, []);
+  assert.match(String(r.note), /nothing high-confidence/);
+});
