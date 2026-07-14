@@ -88,6 +88,36 @@ test("scan never flags an append-only audit record", async () => {
   assert.equal(findingFor(r.findings as unknown[], "CHANGELOG.md").verdict, "keep");
 });
 
+// Regression for a real bug found running scan against chime's own repo: every
+// relative import here spells out the .ts extension (`from "./util.ts"`), and
+// the old regex required the closing quote right after the bare basename, so it
+// never matched — every real, actively-imported source file came back "review".
+test("scan recognizes an import that spells out the file's own extension", async () => {
+  const { home, repo } = tempHome();
+  write(repo, "src/util.ts", "export function helper() { return 1; }\n");
+  write(repo, "src/index.ts", "import { helper } from \"./util.ts\";\nhelper();\n");
+  const r = await repoSlim.handler({ action: "scan", name: "demo" }, ctx(home, ["src/util.ts", "src/index.ts"]));
+  assert.equal(r.ok, true);
+  const f = findingFor(r.findings as unknown[], "src/util.ts");
+  assert.equal(f.verdict, "keep");
+  assert.equal(f.pin, "import-reference");
+});
+
+// Regression for the same real-repo run: root config/lockfiles and test entry
+// points are never textually referenced anywhere, so without an explicit
+// allowlist they landed in the review bucket on every single scan.
+test("scan keeps root config files and test entry points without flagging them", async () => {
+  const { home, repo } = tempHome();
+  write(repo, "package.json", '{"name":"demo"}\n');
+  write(repo, ".gitignore", "node_modules\n");
+  write(repo, "tsconfig.json", "{}\n");
+  write(repo, "test/util.test.ts", "// a test file nothing imports\n");
+  const files = ["package.json", ".gitignore", "tsconfig.json", "test/util.test.ts"];
+  const r = await repoSlim.handler({ action: "scan", name: "demo" }, ctx(home, files));
+  assert.equal(r.ok, true);
+  for (const path of files) assert.equal(findingFor(r.findings as unknown[], path).verdict, "keep", `${path} should be kept`);
+});
+
 test("scan keeps a root agent doc and a CI-referenced file without flagging them", async () => {
   const { home, repo } = tempHome();
   write(repo, "AGENTS.md", "# Agent rules\n\nBe nice.\n");
@@ -148,6 +178,30 @@ test("plan groups only high-confidence findings into tier1/tier2 and excludes lo
   assert.deepEqual(tiers.tier4HistoryPurge, []);
   assert.ok((r.needsReview as { path: string }[]).some((f) => f.path === "test/fixtures/sample-data.json"));
   assert.match(String(r.planHash), /^sha256:/);
+});
+
+test("rules returns the exact File Lifecycle snippet and needs no project", async () => {
+  const { home } = tempHome();
+  const r = await repoSlim.handler({ action: "rules" }, ctx(home, []));
+  assert.equal(r.ok, true);
+  assert.equal(
+    r.snippet,
+    `## File Lifecycle rules (repo_slim)
+
+- **Orphan tooling.** A script, helper, or fixture with no consumer — no import,
+  no CI step, no doc link, no spawn/exec reference — gets deleted, not kept
+  "just in case."
+- **Superseded drafts.** Once a draft's deliverable ships, the draft is deleted,
+  not archived alongside the shipped copy.
+- **Version-era snapshots.** A prompt, note, or "pending" list tied to a shipped
+  version is deleted once that version ships; it is not a permanent record.
+- **Stub copies.** A file whose content lives elsewhere is deleted — one source
+  and a link is the rule, not two copies of the same fact.
+- **Exemption: append-only records.** Audit logs, changelogs, and other
+  append-only records are never subject to the rules above; they are exempt by
+  design.
+`,
+  );
 });
 
 test("plan's planHash is stable for the same tree and changes when the file set changes", async () => {

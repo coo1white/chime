@@ -42,12 +42,37 @@ const NOT_IMPLEMENTED = [
 const inputSchema: JsonSchema = {
   type: "object",
   properties: {
-    action: { type: "string", enum: ["scan", "plan"], description: "scan is read-only file-by-file classification; plan groups scan's findings into risk tiers and returns a planHash over the exact batch" },
-    name: { type: "string", description: "project name from ~/.chime/projects.json" },
+    action: {
+      type: "string",
+      enum: ["scan", "plan", "rules"],
+      description: "scan is read-only file-by-file classification; plan groups scan's findings into risk tiers and returns a planHash over the exact batch; rules emits a ready-to-commit anti-regrowth rules snippet (no project needed)",
+    },
+    name: { type: "string", description: "project name from ~/.chime/projects.json — required for scan and plan, unused by rules" },
   },
-  required: ["action", "name"],
+  required: ["action"],
   additionalProperties: false,
 };
+
+// The four File Lifecycle rules plus the append-only exemption, as a ready-to-
+// commit markdown snippet for a target repo's agent rules file — pure data, no
+// logic, so a snapshot test is the only test this needs. One rule per rot-
+// taxonomy delete class (duplicate-doc-pair isn't here: merging two docs is a
+// one-time cleanup, not a standing rule against regrowth).
+const RULES_SNIPPET = `## File Lifecycle rules (repo_slim)
+
+- **Orphan tooling.** A script, helper, or fixture with no consumer — no import,
+  no CI step, no doc link, no spawn/exec reference — gets deleted, not kept
+  "just in case."
+- **Superseded drafts.** Once a draft's deliverable ships, the draft is deleted,
+  not archived alongside the shipped copy.
+- **Version-era snapshots.** A prompt, note, or "pending" list tied to a shipped
+  version is deleted once that version ships; it is not a permanent record.
+- **Stub copies.** A file whose content lives elsewhere is deleted — one source
+  and a link is the rule, not two copies of the same fact.
+- **Exemption: append-only records.** Audit logs, changelogs, and other
+  append-only records are never subject to the rules above; they are exempt by
+  design.
+`;
 
 function insideHome(path: string, home: string): boolean {
   const rel = relative(resolve(home), resolve(path));
@@ -57,12 +82,28 @@ function insideHome(path: string, home: string): boolean {
 // --- ecosystem / append-only allowlists — checked before anything else ------
 
 const ROOT_DOC_NAMES = /^(AGENTS|CLAUDE|README|LICENSE|CONTRIBUTING)(\.[A-Za-z0-9]+)?$/i;
+// Root-level convention files a toolchain finds by fixed NAME, never by textual
+// reference — grep will never find a "pin" for these, so without this allowlist
+// they'd land in the low-confidence review bucket every single run. Found by
+// running scan against chime's own repo: package.json/.gitignore/lockfiles came
+// back "review" purely because nothing ever spells their own filename out loud.
+const ROOT_CONFIG_NAMES = /^(package(-lock)?\.json|\.gitignore|\.npmignore|\.editorconfig|tsconfig(\..+)?\.json)$/i;
+// A file the test runner finds by glob/naming convention (node:test, Jest,
+// Vitest, ...), never by import — the other real gap the chime self-scan
+// surfaced: every *.test.ts in this repo is a real entry point, not dead code.
+const TEST_ENTRY_POINT_RE = /\.(test|spec)\.[cm]?[jt]sx?$/i;
 const ECOSYSTEM_PATH_PATTERNS: RegExp[] = [/^\.github\//, /^Formula\/.+\.rb$/];
 const APPEND_ONLY_PATTERNS: RegExp[] = [/^CHANGELOG(\.[A-Za-z0-9]+)?$/i, /^HISTORY(\.[A-Za-z0-9]+)?$/i, /(^|\/)audit\//i];
 
-function isEcosystemPin(path: string): boolean {
-  if (!path.includes("/") && ROOT_DOC_NAMES.test(path)) return true;
-  return ECOSYSTEM_PATH_PATTERNS.some((re) => re.test(path));
+// Returns a human-readable reason when `path` matches a known ecosystem
+// convention, or undefined when it doesn't — the reason flows straight into the
+// finding's evidence field instead of one generic sentence for every case.
+function ecosystemPinReason(path: string): string | undefined {
+  if (!path.includes("/") && ROOT_DOC_NAMES.test(path)) return "a root agent/doc file (README, LICENSE, AGENTS.md, ...)";
+  if (!path.includes("/") && ROOT_CONFIG_NAMES.test(path)) return "a root config/lockfile a toolchain finds by fixed name (package.json, .gitignore, tsconfig.json, ...)";
+  if (TEST_ENTRY_POINT_RE.test(path)) return "a test entry point a test runner finds by naming convention, not by import";
+  if (ECOSYSTEM_PATH_PATTERNS.some((re) => re.test(path))) return "a CI workflow or Homebrew Formula path convention";
+  return undefined;
 }
 
 function isAppendOnly(path: string): boolean {
@@ -95,7 +136,10 @@ function findPin(target: string, files: Map<string, string>): PinMatch | undefin
   const pathNeedle = escapeRegExp(target);
   const parentDir = basename(dirname(target));
 
-  const importRe = new RegExp(`(?:from\\s+|require\\(|import\\()\\s*["'\`][^"'\`]*${escapeRegExp(baseNoExt)}["'\`]`);
+  // baseNoExt may be followed by its own extension in the specifier — this
+  // codebase's relative imports spell it out (`from "./repo-slim.ts"`), so the
+  // match must not require the closing quote right after the bare basename.
+  const importRe = new RegExp(`(?:from\\s+|require\\(|import\\()\\s*["'\`][^"'\`]*${escapeRegExp(baseNoExt)}(?:\\.[A-Za-z0-9]+)?["'\`]`);
   const execRe = new RegExp(`\\b(?:spawn|spawnSync|exec|execSync|execFile|execFileSync|runCommand)\\s*\\([^)]*["'\`][^"'\`]*${needle}["'\`]`);
   const linkRe = new RegExp(`\\]\\([^)]*(?:${needle}|${pathNeedle})\\)`);
   const readRe = new RegExp(`\\b(?:readFileSync|readFile)\\s*\\([^)]*["'\`][^"'\`]*${needle}["'\`]`);
@@ -213,8 +257,9 @@ function scanProject(ctx: HandlerContext, dir: string): { findings: Finding[]; e
       findings.push({ path, verdict: "keep", confidence: "high", pin: "append-only-record", evidence: "matches the append-only audit record allowlist — always exempt" });
       continue;
     }
-    if (isEcosystemPin(path)) {
-      findings.push({ path, verdict: "keep", confidence: "high", pin: "ecosystem-convention", evidence: "matches an ecosystem path convention (CI, Homebrew Formula, or a root agent/doc file)" });
+    const ecosystemReason = ecosystemPinReason(path);
+    if (ecosystemReason) {
+      findings.push({ path, verdict: "keep", confidence: "high", pin: "ecosystem-convention", evidence: `matches ${ecosystemReason}` });
       continue;
     }
     const content = files.get(path);
@@ -301,7 +346,9 @@ function computePlanHash(tier1: Finding[], tier2: Finding[]): string {
 
 function handler(input: Record<string, unknown>, ctx: HandlerContext): ToolResultPayload {
   const action = String(input.action ?? "");
-  if (action !== "scan" && action !== "plan") return { ok: false, action, error: "action must be scan or plan" };
+  if (action !== "scan" && action !== "plan" && action !== "rules") return { ok: false, action, error: "action must be scan, plan, or rules" };
+
+  if (action === "rules") return { ok: true, action, snippet: RULES_SNIPPET };
 
   const name = typeof input.name === "string" ? input.name.trim() : "";
   if (!name) return { ok: false, action, error: "name is required" };
@@ -340,7 +387,7 @@ function handler(input: Record<string, unknown>, ctx: HandlerContext): ToolResul
 export const repoSlim: Capability = {
   name: "repo_slim",
   description:
-    "Read-only repo slim-down audit for one project (by name from ~/.chime/projects.json). action=scan walks the project's git-tracked files and classifies each one KEEP (with a pin reason — ecosystem convention, append-only record, import, spawn/exec, CI workflow step, package.json field, or doc link) or a rot-taxonomy candidate (delete: orphan tooling / superseded draft / version-era snapshot / stub-copy; merge: duplicate-doc-pair) with an evidence trail and a confidence. Two pin classes can't be fully verified by static grep (a content pin like readFileSync on the file; a runtime path convention) — files with only a soft signal for one of those come back verdict:review, confidence:low, never a blind delete. action=plan groups scan's high-confidence findings into risk tiers (tier1 delete-zero-consumer, tier2 merge-duplicates; tier3 stale-facts and tier4 history-purge are not implemented yet and are always empty) and returns a planHash over the exact batch. This tool never writes to the target project — its only output is the report. The target repo's own full test suite against the committed head is the final arbiter, not this scan.",
+    "Read-only repo slim-down audit for one project (by name from ~/.chime/projects.json). action=scan walks the project's git-tracked files and classifies each one KEEP (with a pin reason — ecosystem convention, append-only record, import, spawn/exec, CI workflow step, package.json field, or doc link) or a rot-taxonomy candidate (delete: orphan tooling / superseded draft / version-era snapshot / stub-copy; merge: duplicate-doc-pair) with an evidence trail and a confidence. Two pin classes can't be fully verified by static grep (a content pin like readFileSync on the file; a runtime path convention) — files with only a soft signal for one of those come back verdict:review, confidence:low, never a blind delete. action=plan groups scan's high-confidence findings into risk tiers (tier1 delete-zero-consumer, tier2 merge-duplicates; tier3 stale-facts and tier4 history-purge are not implemented yet and are always empty) and returns a planHash over the exact batch. action=rules needs no project — it returns a ready-to-commit markdown snippet of the four File Lifecycle rules (anti-regrowth) plus the append-only exemption, for pasting into the target repo's agent rules file. This tool never writes to the target project — its only output is the report. The target repo's own full test suite against the committed head is the final arbiter, not this scan.",
   inputSchema,
   handler,
 };
