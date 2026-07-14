@@ -381,6 +381,31 @@ test("tool list: no dir and nothing configured fails closed with a helpful error
   assert.match(String(res.error), /CHIME_HANDOFF_DIR|handoffDir/);
 });
 
+// A bad or expired git token doesn't surface as a distinct error from this tool
+// — it surfaces as the configured clone simply not being there (the clone step
+// happens outside `ledger`, before this tool ever runs). So the real regression
+// to guard is: a CHIME_HANDOFF_DIR/handoffDir that resolves to a missing dir
+// must still come back ok:true (dispatch-wise, not a crash) with allOk:false and
+// a clear code — through the FULL env/config resolution path, not just the raw
+// kernel function directly (which is already covered above).
+test("tool list: a configured CHIME_HANDOFF_DIR that doesn't exist fails closed, not crashes (the bad/expired-token shape)", async () => {
+  const res = await call({ action: "list" }, ctxEnv({ CHIME_HANDOFF_DIR: "/no/such/handoff-clone" }));
+  assert.equal(res.ok, true);
+  assert.equal(res.source, "env");
+  assert.equal(res.allOk, false);
+  assert.equal((res.entries as { failedChecks: { code: string }[] }[])[0]?.failedChecks[0]?.code, "ledger-dir-unreadable");
+});
+
+test("tool list: a configured handoffDir that doesn't exist fails closed, not crashes (the bad/expired-token shape)", async () => {
+  const home = tempDir();
+  writeConfig(home, { handoffDir: "/no/such/handoff-clone" });
+  const res = await call({ action: "list" }, ctx(home));
+  assert.equal(res.ok, true);
+  assert.equal(res.source, "config");
+  assert.equal(res.allOk, false);
+  assert.equal((res.entries as { failedChecks: { code: string }[] }[])[0]?.failedChecks[0]?.code, "ledger-dir-unreadable");
+});
+
 test("tool list: a whitespace-only dirs[0] falls through to config, same as a whitespace dir", async () => {
   const d = tempDir();
   writeEntry(d, CW_PROPOSAL);
