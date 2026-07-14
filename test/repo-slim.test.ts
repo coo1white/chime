@@ -300,3 +300,141 @@ test("handoff with nothing high-confidence to propose returns an empty proposals
   assert.deepEqual(r.proposals, []);
   assert.match(String(r.note), /nothing high-confidence/);
 });
+
+// --- stale-facts detection (rot class 5, narrowed) -------------------------
+
+test("scan flags a dead path reference in a backtick span", async () => {
+  const { home, repo } = tempHome();
+  write(repo, "README.md", "# demo\n\nSee `src/tools/deleted-module.ts` for details.\n");
+  const r = await repoSlim.handler({ action: "scan", name: "demo" }, ctx(home, ["README.md"]));
+  assert.equal(r.ok, true);
+  const f = findingFor(r.findings as unknown[], "README.md");
+  assert.equal(f.verdict, "review");
+  assert.equal(f.confidence, "low");
+  assert.equal(f.rotClass, "stale-facts");
+  assert.match(String(f.evidence), /src\/tools\/deleted-module\.ts/);
+});
+
+test("scan flags a dead path reference in a markdown link", async () => {
+  const { home, repo } = tempHome();
+  write(repo, "docs/guide.md", "# Guide\n\nMore detail in [the internals doc](docs/internals.md).\n");
+  const r = await repoSlim.handler({ action: "scan", name: "demo" }, ctx(home, ["docs/guide.md"]));
+  assert.equal(r.ok, true);
+  const f = findingFor(r.findings as unknown[], "docs/guide.md");
+  assert.equal(f.verdict, "review");
+  assert.equal(f.rotClass, "stale-facts");
+  assert.match(String(f.evidence), /docs\/internals\.md/);
+});
+
+test("scan does not flag a path reference that actually exists in the tree", async () => {
+  const { home, repo } = tempHome();
+  write(repo, "README.md", "# demo\n\nSee `src/tools/real-module.ts` for details.\n");
+  write(repo, "src/tools/real-module.ts", "export const x = 1;\n");
+  const files = ["README.md", "src/tools/real-module.ts"];
+  const r = await repoSlim.handler({ action: "scan", name: "demo" }, ctx(home, files));
+  assert.equal(r.ok, true);
+  const f = findingFor(r.findings as unknown[], "README.md");
+  assert.equal(f.verdict, "keep");
+});
+
+// Regression for a real false positive found running scan against chime's own
+// docs: a home-directory runtime path (outside the repo entirely) and a
+// template placeholder both look "path-like" (contain / and an extension) but
+// are never checkable against git ls-files.
+test("scan does not treat a home-directory runtime path as a claim", async () => {
+  const { home, repo } = tempHome();
+  write(repo, "README.md", "# demo\n\nReads from `~/.chime/projects.json`.\n");
+  const r = await repoSlim.handler({ action: "scan", name: "demo" }, ctx(home, ["README.md"]));
+  assert.equal(r.ok, true);
+  assert.equal(findingFor(r.findings as unknown[], "README.md").verdict, "keep");
+});
+
+test("scan does not treat a templated placeholder path as a claim", async () => {
+  const { home, repo } = tempHome();
+  write(repo, "README.md", "# demo\n\nNotes live in `~/.chime/memory/<project>.md`.\n");
+  const r = await repoSlim.handler({ action: "scan", name: "demo" }, ctx(home, ["README.md"]));
+  assert.equal(r.ok, true);
+  assert.equal(findingFor(r.findings as unknown[], "README.md").verdict, "keep");
+});
+
+test("scan does not treat placeholder-style prose paths as a claim", async () => {
+  const { home, repo } = tempHome();
+  write(repo, "README.md", "# demo\n\nPass any file, e.g. `path/to/file`, as the argument.\n");
+  const r = await repoSlim.handler({ action: "scan", name: "demo" }, ctx(home, ["README.md"]));
+  assert.equal(r.ok, true);
+  const f = findingFor(r.findings as unknown[], "README.md");
+  assert.equal(f.verdict, "keep");
+});
+
+test("scan flags a dead tool/command reference in a fenced code block", async () => {
+  const { home, repo } = tempHome();
+  write(repo, "README.md", "# demo\n\n```\nreposlim scan --name demo\n```\n");
+  const r = await repoSlim.handler({ action: "scan", name: "demo" }, ctx(home, ["README.md"]));
+  assert.equal(r.ok, true);
+  const f = findingFor(r.findings as unknown[], "README.md");
+  assert.equal(f.verdict, "review");
+  assert.equal(f.rotClass, "stale-facts");
+  assert.match(String(f.evidence), /reposlim/);
+});
+
+// Regression for a real false positive found running scan against chime's own
+// README: "npm run build" matches the same <identifier> <known-verb> shape as
+// a chime tool invocation ("run" is a known action verb), but it's an everyday
+// package-manager command, not a chime tool reference.
+test("scan does not flag a generic package-manager command as a dead tool reference", async () => {
+  const { home, repo } = tempHome();
+  write(repo, "README.md", "# demo\n\n```\nnpm run build                        # tsc -> dist/\n```\n");
+  const r = await repoSlim.handler({ action: "scan", name: "demo" }, ctx(home, ["README.md"]));
+  assert.equal(r.ok, true);
+  assert.equal(findingFor(r.findings as unknown[], "README.md").verdict, "keep");
+});
+
+test("scan does not flag a real, registered tool/command reference", async () => {
+  const { home, repo } = tempHome();
+  write(repo, "README.md", "# demo\n\n```\nrepo_slim scan --name demo\n```\n");
+  const r = await repoSlim.handler({ action: "scan", name: "demo" }, ctx(home, ["README.md"]));
+  assert.equal(r.ok, true);
+  const f = findingFor(r.findings as unknown[], "README.md");
+  assert.equal(f.verdict, "keep");
+});
+
+test("scan checks a living doc even when it would otherwise be ecosystem-pinned keep", async () => {
+  const { home, repo } = tempHome();
+  write(repo, "AGENTS.md", "# Agent rules\n\nRun `src/tools/gone.ts` before committing.\n");
+  const r = await repoSlim.handler({ action: "scan", name: "demo" }, ctx(home, ["AGENTS.md"]));
+  assert.equal(r.ok, true);
+  const f = findingFor(r.findings as unknown[], "AGENTS.md");
+  assert.equal(f.verdict, "review");
+  assert.equal(f.rotClass, "stale-facts");
+});
+
+test("scan never checks an append-only record for stale facts", async () => {
+  const { home, repo } = tempHome();
+  write(repo, "CHANGELOG.md", "# Changelog\n\n## 0.0.1\n- removed `src/tools/gone.ts`\n");
+  const r = await repoSlim.handler({ action: "scan", name: "demo" }, ctx(home, ["CHANGELOG.md"]));
+  assert.equal(r.ok, true);
+  const f = findingFor(r.findings as unknown[], "CHANGELOG.md");
+  assert.equal(f.verdict, "keep");
+});
+
+test("plan puts stale-facts findings in tier3, not needsReview (no double-count)", async () => {
+  const { home, repo } = tempHome();
+  write(repo, "README.md", "# demo\n\nSee `src/tools/deleted-module.ts` for details.\n");
+  const r = await repoSlim.handler({ action: "plan", name: "demo" }, ctx(home, ["README.md"]));
+  assert.equal(r.ok, true);
+  const tiers = r.tiers as { tier3FixStaleFacts: { path: string }[] };
+  assert.equal(tiers.tier3FixStaleFacts.length, 1);
+  assert.equal(tiers.tier3FixStaleFacts[0]!.path, "README.md");
+  assert.equal((r.needsReview as unknown[]).length, 0);
+});
+
+test("handoff does not yet produce a proposal for tier3 stale-facts findings", async () => {
+  const { home, repo } = tempHome();
+  write(repo, "README.md", "# demo\n\nSee `src/tools/deleted-module.ts` for details.\n");
+  const files = ["README.md"];
+  const plan = await repoSlim.handler({ action: "plan", name: "demo" }, ctx(home, files));
+  assert.equal((plan.tiers as { tier3FixStaleFacts: unknown[] }).tier3FixStaleFacts.length, 1);
+  const r = await repoSlim.handler({ action: "handoff", name: "demo", planHash: plan.planHash }, ctx(home, files));
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.proposals, []);
+});

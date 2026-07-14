@@ -21,7 +21,7 @@ import { buildLedgerProposal, type LedgerProposal } from "../ledger.ts";
 
 type Confidence = "high" | "low";
 type Verdict = "keep" | "delete" | "merge" | "review";
-type RotClass = "orphan-tooling" | "superseded-draft" | "version-era-snapshot" | "stub-copy" | "duplicate-doc-pair";
+type RotClass = "orphan-tooling" | "superseded-draft" | "version-era-snapshot" | "stub-copy" | "duplicate-doc-pair" | "stale-facts";
 
 interface Finding {
   path: string;
@@ -37,7 +37,7 @@ const ARBITER_NOTE =
   "The target repo's full test suite against the committed head is the final arbiter, not this scan. mtime is never a signal.";
 
 const NOT_IMPLEMENTED = [
-  "stale-facts (rot class 5) needs semantic comparison of a living doc's claims against the tree — not implemented; route candidate docs through a human or LLM review pass instead of this scan",
+  "stale-facts (rot class 5): only two mechanically checkable claim classes are detected — a dead path reference and a dead tool/command reference, both inside backtick spans, markdown links, or fenced code. Free-form prose claims (an outdated sentence describing behavior) still need semantic comparison and route through a human or LLM review pass. tier3 batches are visible in plan but handoff does not yet produce a proposal for them.",
 ];
 
 // Handed to the executor inside every proposal's rationale — the scan is not the
@@ -235,6 +235,98 @@ function findDuplicateDocPairs(files: Map<string, string>): DocPair[] {
   return pairs;
 }
 
+// --- stale facts (rot class 5, narrowed to two checkable claim classes) ----
+
+// A local, duplicated copy of every registered Capability.name from
+// src/tools/index.ts — NOT imported from there, since that file imports THIS
+// one (repoSlim is itself a registered capability), so importing it back would
+// be circular. Keep this list in lockstep with the registry by hand; the cost
+// of drift is small (a brand-new tool name looks "unregistered" for one PR at
+// worst) and this finding is capped at review/low regardless.
+const KNOWN_TOOL_NAMES = new Set([
+  "colima_disk",
+  "disk_maintenance",
+  "handoff",
+  "ledger",
+  "memory",
+  "project_check",
+  "project_doctor",
+  "project_health",
+  "project_status",
+  "projects",
+  "repo_slim",
+  "self_iteration",
+]);
+
+// A command example is only checked when its second token is one of these
+// verbs — the `<name> <action>` shape chime's own tools use everywhere. This
+// keeps the check narrow: an arbitrary two-word backtick phrase almost never
+// matches both an identifier-shaped first word AND one of these exact verbs.
+const KNOWN_ACTION_VERBS = new Set(["scan", "plan", "rules", "handoff", "preview", "run", "list", "verify", "propose", "review", "status", "check", "doctor"]);
+// Excluded outright even when followed by a KNOWN_ACTION_VERBS-shaped second
+// word — "npm run build" is an everyday README line, not a chime tool
+// reference, and several of these verbs (run, list, status, check) collide
+// with real package-manager/VCS usage. Found by running this against chime's
+// own README before this guard existed.
+const GENERIC_COMMANDS = new Set(["npm", "npx", "yarn", "pnpm", "bun", "node", "deno", "git", "docker", "make", "cargo", "go", "python", "python3", "pip", "pip3", "brew", "gh", "kubectl", "terraform"]);
+const IDENTIFIER_RE = /^[a-z][a-z0-9_]*$/;
+
+function extractBacktickAndFencedSpans(content: string): string[] {
+  const out: string[] = [];
+  for (const m of content.matchAll(/`([^`\n]+)`/g)) out.push(m[1]!);
+  for (const m of content.matchAll(/```[a-zA-Z]*\n([\s\S]*?)```/g)) {
+    for (const line of m[1]!.split("\n")) {
+      const trimmed = line.trim();
+      if (trimmed) out.push(trimmed);
+    }
+  }
+  return out;
+}
+
+function extractLinkTargets(content: string): string[] {
+  return [...content.matchAll(/\]\(([^)\s]+)\)/g)].map((m) => m[1]!);
+}
+
+// A candidate string only "looks like" a repo-relative path claim when it has
+// a plausible extension or its directory prefix matches a real tracked
+// directory — this is what keeps placeholder prose like `path/to/file` from
+// being treated as a claim at all (no extension, and "path/to" isn't a real
+// tracked directory).
+function looksLikePathClaim(raw: string, trackedDirs: Set<string>): string | undefined {
+  // ~/... is a home-directory runtime path (outside the repo entirely, e.g.
+  // ~/.chime/projects.json) — never repo-relative, so never checkable against
+  // git ls-files. <...> is a template placeholder (~/.chime/memory/<project>.md)
+  // — not a literal reference either. Found by running this against chime's own
+  // docs: both patterns false-positived as "dead" before this guard existed.
+  if (/^https?:/.test(raw) || raw.startsWith("/") || raw.startsWith("#") || raw.startsWith("~") || /[<>]/.test(raw)) return undefined;
+  const s = raw.replace(/^\.\//, "").split(/[?#]/)[0]!;
+  if (!s.includes("/")) return undefined;
+  const hasExt = /\.[A-Za-z0-9]{1,8}$/.test(s);
+  const dir = s.split("/").slice(0, -1).join("/");
+  if (!hasExt && !trackedDirs.has(dir)) return undefined;
+  return s;
+}
+
+// Returns the FIRST stale reference found (one finding is enough to route a
+// doc to a human), or undefined. Only clearly-structured references are
+// checked — backtick spans, fenced code, and markdown links — free-form prose
+// stays out of scope, see NOT_IMPLEMENTED.
+function findStaleFacts(content: string, trackedFiles: Set<string>, trackedDirs: Set<string>): { evidence: string } | undefined {
+  for (const span of extractBacktickAndFencedSpans(content)) {
+    const tokens = span.split(/\s+/).filter(Boolean);
+    if (tokens.length >= 2 && IDENTIFIER_RE.test(tokens[0]!) && KNOWN_ACTION_VERBS.has(tokens[1]!) && !KNOWN_TOOL_NAMES.has(tokens[0]!) && !GENERIC_COMMANDS.has(tokens[0]!)) {
+      return { evidence: `references "${tokens[0]}", which isn't a registered tool name (command shown: \`${span}\`)` };
+    }
+    const path = looksLikePathClaim(span, trackedDirs);
+    if (path && !trackedFiles.has(path)) return { evidence: `references path "${path}" (in \`${span}\`), which isn't in the tracked tree` };
+  }
+  for (const target of extractLinkTargets(content)) {
+    const path = looksLikePathClaim(target, trackedDirs);
+    if (path && !trackedFiles.has(path)) return { evidence: `links to "${path}", which isn't in the tracked tree` };
+  }
+  return undefined;
+}
+
 // --- scan --------------------------------------------------------------
 
 const MAX_READ_BYTES = 1_000_000;
@@ -259,11 +351,22 @@ function readAll(dir: string, paths: string[]): Map<string, string> {
   return out;
 }
 
+function buildTrackedDirs(paths: string[]): Set<string> {
+  const dirs = new Set<string>();
+  for (const p of paths) {
+    const parts = p.split("/");
+    for (let i = 1; i < parts.length; i++) dirs.add(parts.slice(0, i).join("/"));
+  }
+  return dirs;
+}
+
 function scanProject(ctx: HandlerContext, dir: string): { findings: Finding[]; error?: string } {
   const tracked = readTrackedFiles(ctx, dir);
   if (tracked.error) return { findings: [], error: tracked.error };
   const files = readAll(dir, tracked.files);
   const dupPairs = findDuplicateDocPairs(files);
+  const trackedFiles = new Set(tracked.files);
+  const trackedDirs = buildTrackedDirs(tracked.files);
 
   const findings: Finding[] = [];
   for (const path of tracked.files) {
@@ -271,6 +374,19 @@ function scanProject(ctx: HandlerContext, dir: string): { findings: Finding[]; e
       findings.push({ path, verdict: "keep", confidence: "high", pin: "append-only-record", evidence: "matches the append-only audit record allowlist — always exempt" });
       continue;
     }
+
+    const preEcosystemContent = files.get(path);
+    // Stale-facts runs BEFORE the ecosystem/pin chain below, so a "kept" living
+    // doc (README, AGENTS.md, ...) still gets checked — those are exactly the
+    // docs a stale-facts risk lives in, not orphaned ones.
+    if (preEcosystemContent !== undefined && extname(path) === ".md") {
+      const stale = findStaleFacts(preEcosystemContent, trackedFiles, trackedDirs);
+      if (stale) {
+        findings.push({ path, verdict: "review", confidence: "low", rotClass: "stale-facts", evidence: stale.evidence });
+        continue;
+      }
+    }
+
     const ecosystemReason = ecosystemPinReason(path);
     if (ecosystemReason) {
       findings.push({ path, verdict: "keep", confidence: "high", pin: "ecosystem-convention", evidence: `matches ${ecosystemReason}` });
@@ -338,11 +454,14 @@ function stableStringify(value: unknown): string {
   return `{${body}}`;
 }
 
-function buildTiers(findings: Finding[]): { tier1: Finding[]; tier2: Finding[]; needsReview: Finding[] } {
+function buildTiers(findings: Finding[]): { tier1: Finding[]; tier2: Finding[]; tier3: Finding[]; needsReview: Finding[] } {
   const tier1 = findings.filter((f) => f.verdict === "delete" && f.confidence === "high");
   const tier2 = findings.filter((f) => f.verdict === "merge" && f.confidence === "high");
-  const needsReview = findings.filter((f) => f.confidence === "low" || f.verdict === "review");
-  return { tier1, tier2, needsReview };
+  const tier3 = findings.filter((f) => f.rotClass === "stale-facts");
+  // Every finding lands in exactly one bucket — tier3 (always confidence:low,
+  // verdict:review by construction) would otherwise double up with needsReview.
+  const needsReview = findings.filter((f) => (f.confidence === "low" || f.verdict === "review") && f.rotClass !== "stale-facts");
+  return { tier1, tier2, tier3, needsReview };
 }
 
 // A content hash of the exact batch a downstream handoff step would act on —
@@ -384,7 +503,7 @@ function handler(input: Record<string, unknown>, ctx: HandlerContext): ToolResul
   // plan and handoff both need the tiers and a live planHash — handoff recomputes
   // this from a FRESH scan every call (never a cached value), same as
   // disk-maintenance.ts's run gate.
-  const { tier1, tier2, needsReview } = buildTiers(scanned.findings);
+  const { tier1, tier2, tier3, needsReview } = buildTiers(scanned.findings);
   const planHash = computePlanHash(tier1, tier2);
 
   if (action === "plan") {
@@ -395,7 +514,9 @@ function handler(input: Record<string, unknown>, ctx: HandlerContext): ToolResul
       tiers: {
         tier1DeleteZeroConsumer: tier1,
         tier2MergeDuplicates: tier2,
-        tier3FixStaleFacts: [],
+        // tier3 is populated (dead path/tool-command references) but handoff
+        // does not yet turn it into a proposal batch — see NOT_IMPLEMENTED.
+        tier3FixStaleFacts: tier3,
         tier4HistoryPurge: [],
       },
       needsReview,
@@ -467,7 +588,7 @@ function handler(input: Record<string, unknown>, ctx: HandlerContext): ToolResul
 export const repoSlim: Capability = {
   name: "repo_slim",
   description:
-    "Read-only repo slim-down audit for one project (by name from ~/.chime/projects.json). action=scan walks the project's git-tracked files and classifies each one KEEP (with a pin reason — ecosystem convention, append-only record, import, spawn/exec, CI workflow step, package.json field, or doc link) or a rot-taxonomy candidate (delete: orphan tooling / superseded draft / version-era snapshot / stub-copy; merge: duplicate-doc-pair) with an evidence trail and a confidence. Two pin classes can't be fully verified by static grep (a content pin like readFileSync on the file; a runtime path convention) — files with only a soft signal for one of those come back verdict:review, confidence:low, never a blind delete. action=plan groups scan's high-confidence findings into risk tiers (tier1 delete-zero-consumer, tier2 merge-duplicates; tier3 stale-facts and tier4 history-purge are not implemented yet and are always empty) and returns a planHash over the exact batch. action=rules needs no project — it returns a ready-to-commit markdown snippet of the four File Lifecycle rules (anti-regrowth) plus the append-only exemption, for pasting into the target repo's agent rules file. action=handoff turns plan's tier1/tier2 batches into ledger propose entries (reusing the existing ledger tool's format) — it REQUIRES the exact planHash from a prior plan call for this same project and refuses on any mismatch; dryRun (default true) marks proposals draft vs ready-to-relay, but repo_slim never sends or relays anything itself either way — an operator always does that by hand. This tool never writes to the target project — its only output is the report. The target repo's own full test suite against the committed head is the final arbiter, not this scan.",
+    "Read-only repo slim-down audit for one project (by name from ~/.chime/projects.json). action=scan walks the project's git-tracked files and classifies each one KEEP (with a pin reason — ecosystem convention, append-only record, import, spawn/exec, CI workflow step, package.json field, or doc link) or a rot-taxonomy candidate (delete: orphan tooling / superseded draft / version-era snapshot / stub-copy; merge: duplicate-doc-pair; review: stale-facts — a markdown file with a dead path reference or a dead tool/command reference in a backtick span, markdown link, or fenced code block) with an evidence trail and a confidence. Two pin classes can't be fully verified by static grep (a content pin like readFileSync on the file; a runtime path convention) — files with only a soft signal for one of those come back verdict:review, confidence:low, never a blind delete. Stale-facts is likewise narrow: only structured dead references are caught, free-form prose claims still need a human or LLM pass. action=plan groups scan's high-confidence findings into risk tiers (tier1 delete-zero-consumer, tier2 merge-duplicates, tier3 stale-facts; tier4 history-purge is not implemented and always empty) and returns a planHash over the exact batch; note handoff does not yet produce a proposal for tier3. action=rules needs no project — it returns a ready-to-commit markdown snippet of the four File Lifecycle rules (anti-regrowth) plus the append-only exemption, for pasting into the target repo's agent rules file. action=handoff turns plan's tier1/tier2 batches into ledger propose entries (reusing the existing ledger tool's format) — it REQUIRES the exact planHash from a prior plan call for this same project and refuses on any mismatch; dryRun (default true) marks proposals draft vs ready-to-relay, but repo_slim never sends or relays anything itself either way — an operator always does that by hand. This tool never writes to the target project — its only output is the report. The target repo's own full test suite against the committed head is the final arbiter, not this scan.",
   inputSchema,
   handler,
 };
