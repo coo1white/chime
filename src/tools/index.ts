@@ -10,7 +10,8 @@ import { handoff } from "./handoff.ts";
 import { ledger } from "./ledger.ts";
 import { diskMaintenance } from "./disk-maintenance.ts";
 import { selfIteration } from "./self-iteration.ts";
+import { repoSlim } from "./repo-slim.ts";
 
 // Every tool module appends its capability here. The registry spreads this array,
 // so adding a feature is one module + one entry — nothing else changes.
-export const TOOLS: Capability[] = [colimaDisk, projects, projectStatus, projectCheck, projectDoctor, projectHealth, memory, handoff, ledger, diskMaintenance, selfIteration];
+export const TOOLS: Capability[] = [colimaDisk, projects, projectStatus, projectCheck, projectDoctor, projectHealth, memory, handoff, ledger, diskMaintenance, selfIteration, repoSlim];
