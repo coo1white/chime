@@ -250,12 +250,13 @@ test("handoff with a stale planHash after the tree changed is refused, forcing a
   assert.equal(freshHandoff.ok, true);
 });
 
-test("handoff with a matching planHash emits one sealed proposal per non-empty tier, draft by default", async () => {
+test("handoff with a matching planHash emits one sealed proposal per non-empty tier (all three), draft by default", async () => {
   const { home, repo } = tempHome();
   write(repo, "scripts/dead.sh", "#!/bin/sh\necho dead\n");
   write(repo, "docs/setup.md", "# Getting Started\n\nOld setup notes.\n");
   write(repo, "docs/setup-new.md", "# Getting Started\n\nNewer, more complete setup notes.\n");
-  const files = ["scripts/dead.sh", "docs/setup.md", "docs/setup-new.md"];
+  write(repo, "AGENTS.md", "# Agent rules\n\nSee `src/tools/deleted-module.ts` for details.\n");
+  const files = ["scripts/dead.sh", "docs/setup.md", "docs/setup-new.md", "AGENTS.md"];
 
   const plan = await repoSlim.handler({ action: "plan", name: "demo" }, ctx(home, files));
   assert.equal(plan.ok, true);
@@ -266,13 +267,15 @@ test("handoff with a matching planHash emits one sealed proposal per non-empty t
   assert.match(String(r.status), /^draft/);
 
   const proposals = r.proposals as Record<string, unknown>[];
-  assert.equal(proposals.length, 2);
+  assert.equal(proposals.length, 3);
   const deleteProposal = proposals.find((p) => String(p.title).includes("delete"))!;
   const mergeProposal = proposals.find((p) => String(p.title).includes("merge"))!;
+  const fixProposal = proposals.find((p) => String(p.title).includes("fix"))!;
   assert.deepEqual(deleteProposal.targetFiles, ["scripts/dead.sh"]);
   // Both members of the pair carry the merge verdict (each pairWith-linked to the
   // other), so the batch's targetFiles covers both files a real merge PR touches.
   assert.deepEqual(mergeProposal.targetFiles, ["docs/setup.md", "docs/setup-new.md"]);
+  assert.deepEqual(fixProposal.targetFiles, ["AGENTS.md"]);
   assert.equal(deleteProposal.from, "chime");
   assert.equal(deleteProposal.to, "cool-workflow");
   assert.match(String(deleteProposal.id), /^ldg-/);
@@ -298,7 +301,7 @@ test("handoff with nothing high-confidence to propose returns an empty proposals
   const r = await repoSlim.handler({ action: "handoff", name: "demo", planHash: plan.planHash }, ctx(home, files));
   assert.equal(r.ok, true);
   assert.deepEqual(r.proposals, []);
-  assert.match(String(r.note), /nothing high-confidence/);
+  assert.match(String(r.note), /nothing to hand off/);
 });
 
 // --- stale-facts detection (rot class 5, narrowed) -------------------------
@@ -428,7 +431,7 @@ test("plan puts stale-facts findings in tier3, not needsReview (no double-count)
   assert.equal((r.needsReview as unknown[]).length, 0);
 });
 
-test("handoff does not yet produce a proposal for tier3 stale-facts findings", async () => {
+test("handoff turns a tier3 stale-facts batch into its own proposal, naming each dead reference", async () => {
   const { home, repo } = tempHome();
   write(repo, "README.md", "# demo\n\nSee `src/tools/deleted-module.ts` for details.\n");
   const files = ["README.md"];
@@ -436,5 +439,28 @@ test("handoff does not yet produce a proposal for tier3 stale-facts findings", a
   assert.equal((plan.tiers as { tier3FixStaleFacts: unknown[] }).tier3FixStaleFacts.length, 1);
   const r = await repoSlim.handler({ action: "handoff", name: "demo", planHash: plan.planHash }, ctx(home, files));
   assert.equal(r.ok, true);
-  assert.deepEqual(r.proposals, []);
+  const proposals = r.proposals as Record<string, unknown>[];
+  assert.equal(proposals.length, 1);
+  const fixProposal = proposals[0]!;
+  assert.match(String(fixProposal.title), /fix 1 stale-fact reference/);
+  assert.deepEqual(fixProposal.targetFiles, ["README.md"]);
+  assert.match(String(fixProposal.rationale), /src\/tools\/deleted-module\.ts/);
+  assert.match(String(fixProposal.rationale), /docs fix, not a delete or merge/);
+});
+
+test("handoff's planHash gate also protects tier3 — a stale-facts change without touching tier1/tier2 still refuses", async () => {
+  const { home, repo } = tempHome();
+  write(repo, "README.md", "# demo\n\nSee `src/tools/deleted-module.ts` for details.\n");
+  const files = ["README.md"];
+  const plan = await repoSlim.handler({ action: "plan", name: "demo" }, ctx(home, files));
+  const staleHash = plan.planHash as string;
+
+  // The dead reference gets fixed (tier3 changes) — tier1/tier2 never had anything.
+  write(repo, "README.md", "# demo\n\nSee `src/tools/real-module.ts` for details.\n");
+  write(repo, "src/tools/real-module.ts", "export const x = 1;\n");
+  const changedFiles = ["README.md", "src/tools/real-module.ts"];
+
+  const stale = await repoSlim.handler({ action: "handoff", name: "demo", planHash: staleHash }, ctx(home, changedFiles));
+  assert.equal(stale.ok, false);
+  assert.match(String(stale.error), /planHash does not match|plan again/);
 });

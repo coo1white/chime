@@ -37,7 +37,7 @@ const ARBITER_NOTE =
   "The target repo's full test suite against the committed head is the final arbiter, not this scan. mtime is never a signal.";
 
 const NOT_IMPLEMENTED = [
-  "stale-facts (rot class 5): only two mechanically checkable claim classes are detected — a dead path reference and a dead tool/command reference, both inside backtick spans, markdown links, or fenced code. Free-form prose claims (an outdated sentence describing behavior) still need semantic comparison and route through a human or LLM review pass. tier3 batches are visible in plan but handoff does not yet produce a proposal for them.",
+  "stale-facts (rot class 5): only two mechanically checkable claim classes are detected — a dead path reference and a dead tool/command reference, both inside backtick spans, markdown links, or fenced code. Free-form prose claims (an outdated sentence describing behavior) still need semantic comparison and route through a human or LLM review pass.",
 ];
 
 // Handed to the executor inside every proposal's rationale — the scan is not the
@@ -467,10 +467,11 @@ function buildTiers(findings: Finding[]): { tier1: Finding[]; tier2: Finding[]; 
 // A content hash of the exact batch a downstream handoff step would act on —
 // same shape as disk-maintenance.ts's computePlanHash: recompute-and-compare,
 // never trust a caller-supplied plan blindly.
-function computePlanHash(tier1: Finding[], tier2: Finding[]): string {
+function computePlanHash(tier1: Finding[], tier2: Finding[], tier3: Finding[]): string {
   const canon = {
     tier1: tier1.map((f) => ({ path: f.path, rotClass: f.rotClass })).sort((a, b) => a.path.localeCompare(b.path)),
     tier2: tier2.map((f) => ({ path: f.path, pairWith: f.pairWith })).sort((a, b) => a.path.localeCompare(b.path)),
+    tier3: tier3.map((f) => ({ path: f.path, evidence: f.evidence })).sort((a, b) => a.path.localeCompare(b.path)),
   };
   return `sha256:${createHash("sha256").update(stableStringify(canon)).digest("hex")}`;
 }
@@ -504,7 +505,7 @@ function handler(input: Record<string, unknown>, ctx: HandlerContext): ToolResul
   // this from a FRESH scan every call (never a cached value), same as
   // disk-maintenance.ts's run gate.
   const { tier1, tier2, tier3, needsReview } = buildTiers(scanned.findings);
-  const planHash = computePlanHash(tier1, tier2);
+  const planHash = computePlanHash(tier1, tier2, tier3);
 
   if (action === "plan") {
     return {
@@ -514,8 +515,6 @@ function handler(input: Record<string, unknown>, ctx: HandlerContext): ToolResul
       tiers: {
         tier1DeleteZeroConsumer: tier1,
         tier2MergeDuplicates: tier2,
-        // tier3 is populated (dead path/tool-command references) but handoff
-        // does not yet turn it into a proposal batch — see NOT_IMPLEMENTED.
         tier3FixStaleFacts: tier3,
         tier4HistoryPurge: [],
       },
@@ -568,6 +567,21 @@ function handler(input: Record<string, unknown>, ctx: HandlerContext): ToolResul
       }),
     );
   }
+  if (tier3.length > 0) {
+    proposals.push(
+      buildLedgerProposal({
+        from,
+        to,
+        title: `repo_slim: fix ${tier3.length} stale-fact reference(s) in ${name}`,
+        // Each finding's own evidence names the exact dead reference — worth
+        // surfacing per-file here, unlike tier1/tier2, since a fix (not a
+        // delete/merge) needs to know WHAT to change, not just where.
+        rationale: `repo_slim scan found ${tier3.length} markdown file(s) with a dead path or tool/command reference (backtick span, markdown link, or fenced code block) that no longer resolves in the tracked tree: ${tier3.map((f) => `${f.path} — ${f.evidence}`).join("; ")}. This is a docs fix, not a delete or merge. ${VERIFICATION_CONTRACT}`,
+        targetFiles: tier3.map((f) => f.path),
+        createdAt,
+      }),
+    );
+  }
 
   return {
     ok: true,
@@ -578,7 +592,7 @@ function handler(input: Record<string, unknown>, ctx: HandlerContext): ToolResul
       ? "draft — review before handing to the operator; repo_slim never relays this itself"
       : "ready-to-relay — hand these to the operator for the shared handoff repo; repo_slim never relays this itself",
     proposals,
-    note: proposals.length === 0 ? "no tier1/tier2 batches to propose — nothing high-confidence to hand off right now" : undefined,
+    note: proposals.length === 0 ? "no tier1/tier2/tier3 batches to propose — nothing to hand off right now" : undefined,
     planHash,
     notImplemented: NOT_IMPLEMENTED,
     arbiter: ARBITER_NOTE,
@@ -588,7 +602,7 @@ function handler(input: Record<string, unknown>, ctx: HandlerContext): ToolResul
 export const repoSlim: Capability = {
   name: "repo_slim",
   description:
-    "Read-only repo slim-down audit for one project (by name from ~/.chime/projects.json). action=scan walks the project's git-tracked files and classifies each one KEEP (with a pin reason — ecosystem convention, append-only record, import, spawn/exec, CI workflow step, package.json field, or doc link) or a rot-taxonomy candidate (delete: orphan tooling / superseded draft / version-era snapshot / stub-copy; merge: duplicate-doc-pair; review: stale-facts — a markdown file with a dead path reference or a dead tool/command reference in a backtick span, markdown link, or fenced code block) with an evidence trail and a confidence. Two pin classes can't be fully verified by static grep (a content pin like readFileSync on the file; a runtime path convention) — files with only a soft signal for one of those come back verdict:review, confidence:low, never a blind delete. Stale-facts is likewise narrow: only structured dead references are caught, free-form prose claims still need a human or LLM pass. action=plan groups scan's high-confidence findings into risk tiers (tier1 delete-zero-consumer, tier2 merge-duplicates, tier3 stale-facts; tier4 history-purge is not implemented and always empty) and returns a planHash over the exact batch; note handoff does not yet produce a proposal for tier3. action=rules needs no project — it returns a ready-to-commit markdown snippet of the four File Lifecycle rules (anti-regrowth) plus the append-only exemption, for pasting into the target repo's agent rules file. action=handoff turns plan's tier1/tier2 batches into ledger propose entries (reusing the existing ledger tool's format) — it REQUIRES the exact planHash from a prior plan call for this same project and refuses on any mismatch; dryRun (default true) marks proposals draft vs ready-to-relay, but repo_slim never sends or relays anything itself either way — an operator always does that by hand. This tool never writes to the target project — its only output is the report. The target repo's own full test suite against the committed head is the final arbiter, not this scan.",
+    "Read-only repo slim-down audit for one project (by name from ~/.chime/projects.json). action=scan walks the project's git-tracked files and classifies each one KEEP (with a pin reason — ecosystem convention, append-only record, import, spawn/exec, CI workflow step, package.json field, or doc link) or a rot-taxonomy candidate (delete: orphan tooling / superseded draft / version-era snapshot / stub-copy; merge: duplicate-doc-pair; review: stale-facts — a markdown file with a dead path reference or a dead tool/command reference in a backtick span, markdown link, or fenced code block) with an evidence trail and a confidence. Two pin classes can't be fully verified by static grep (a content pin like readFileSync on the file; a runtime path convention) — files with only a soft signal for one of those come back verdict:review, confidence:low, never a blind delete. Stale-facts is likewise narrow: only structured dead references are caught, free-form prose claims still need a human or LLM pass. action=plan groups scan's high-confidence findings into risk tiers (tier1 delete-zero-consumer, tier2 merge-duplicates, tier3 fix-stale-facts; tier4 history-purge is not implemented and always empty) and returns a planHash over the exact batch. action=rules needs no project — it returns a ready-to-commit markdown snippet of the four File Lifecycle rules (anti-regrowth) plus the append-only exemption, for pasting into the target repo's agent rules file. action=handoff turns plan's tier1/tier2/tier3 batches into ledger propose entries (reusing the existing ledger tool's format), one proposal per non-empty tier — it REQUIRES the exact planHash from a prior plan call for this same project and refuses on any mismatch; dryRun (default true) marks proposals draft vs ready-to-relay, but repo_slim never sends or relays anything itself either way — an operator always does that by hand. This tool never writes to the target project — its only output is the report. The target repo's own full test suite against the committed head is the final arbiter, not this scan.",
   inputSchema,
   handler,
 };
