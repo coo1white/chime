@@ -150,6 +150,30 @@ test("plan groups only high-confidence findings into tier1/tier2 and excludes lo
   assert.match(String(r.planHash), /^sha256:/);
 });
 
+test("rules returns the exact File Lifecycle snippet and needs no project", async () => {
+  const { home } = tempHome();
+  const r = await repoSlim.handler({ action: "rules" }, ctx(home, []));
+  assert.equal(r.ok, true);
+  assert.equal(
+    r.snippet,
+    `## File Lifecycle rules (repo_slim)
+
+- **Orphan tooling.** A script, helper, or fixture with no consumer — no import,
+  no CI step, no doc link, no spawn/exec reference — gets deleted, not kept
+  "just in case."
+- **Superseded drafts.** Once a draft's deliverable ships, the draft is deleted,
+  not archived alongside the shipped copy.
+- **Version-era snapshots.** A prompt, note, or "pending" list tied to a shipped
+  version is deleted once that version ships; it is not a permanent record.
+- **Stub copies.** A file whose content lives elsewhere is deleted — one source
+  and a link is the rule, not two copies of the same fact.
+- **Exemption: append-only records.** Audit logs, changelogs, and other
+  append-only records are never subject to the rules above; they are exempt by
+  design.
+`,
+  );
+});
+
 test("plan's planHash is stable for the same tree and changes when the file set changes", async () => {
   const { home, repo } = tempHome();
   write(repo, "scripts/dead.sh", "#!/bin/sh\necho dead\n");
