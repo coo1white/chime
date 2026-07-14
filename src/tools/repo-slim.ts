@@ -82,12 +82,28 @@ function insideHome(path: string, home: string): boolean {
 // --- ecosystem / append-only allowlists — checked before anything else ------
 
 const ROOT_DOC_NAMES = /^(AGENTS|CLAUDE|README|LICENSE|CONTRIBUTING)(\.[A-Za-z0-9]+)?$/i;
+// Root-level convention files a toolchain finds by fixed NAME, never by textual
+// reference — grep will never find a "pin" for these, so without this allowlist
+// they'd land in the low-confidence review bucket every single run. Found by
+// running scan against chime's own repo: package.json/.gitignore/lockfiles came
+// back "review" purely because nothing ever spells their own filename out loud.
+const ROOT_CONFIG_NAMES = /^(package(-lock)?\.json|\.gitignore|\.npmignore|\.editorconfig|tsconfig(\..+)?\.json)$/i;
+// A file the test runner finds by glob/naming convention (node:test, Jest,
+// Vitest, ...), never by import — the other real gap the chime self-scan
+// surfaced: every *.test.ts in this repo is a real entry point, not dead code.
+const TEST_ENTRY_POINT_RE = /\.(test|spec)\.[cm]?[jt]sx?$/i;
 const ECOSYSTEM_PATH_PATTERNS: RegExp[] = [/^\.github\//, /^Formula\/.+\.rb$/];
 const APPEND_ONLY_PATTERNS: RegExp[] = [/^CHANGELOG(\.[A-Za-z0-9]+)?$/i, /^HISTORY(\.[A-Za-z0-9]+)?$/i, /(^|\/)audit\//i];
 
-function isEcosystemPin(path: string): boolean {
-  if (!path.includes("/") && ROOT_DOC_NAMES.test(path)) return true;
-  return ECOSYSTEM_PATH_PATTERNS.some((re) => re.test(path));
+// Returns a human-readable reason when `path` matches a known ecosystem
+// convention, or undefined when it doesn't — the reason flows straight into the
+// finding's evidence field instead of one generic sentence for every case.
+function ecosystemPinReason(path: string): string | undefined {
+  if (!path.includes("/") && ROOT_DOC_NAMES.test(path)) return "a root agent/doc file (README, LICENSE, AGENTS.md, ...)";
+  if (!path.includes("/") && ROOT_CONFIG_NAMES.test(path)) return "a root config/lockfile a toolchain finds by fixed name (package.json, .gitignore, tsconfig.json, ...)";
+  if (TEST_ENTRY_POINT_RE.test(path)) return "a test entry point a test runner finds by naming convention, not by import";
+  if (ECOSYSTEM_PATH_PATTERNS.some((re) => re.test(path))) return "a CI workflow or Homebrew Formula path convention";
+  return undefined;
 }
 
 function isAppendOnly(path: string): boolean {
@@ -120,7 +136,10 @@ function findPin(target: string, files: Map<string, string>): PinMatch | undefin
   const pathNeedle = escapeRegExp(target);
   const parentDir = basename(dirname(target));
 
-  const importRe = new RegExp(`(?:from\\s+|require\\(|import\\()\\s*["'\`][^"'\`]*${escapeRegExp(baseNoExt)}["'\`]`);
+  // baseNoExt may be followed by its own extension in the specifier — this
+  // codebase's relative imports spell it out (`from "./repo-slim.ts"`), so the
+  // match must not require the closing quote right after the bare basename.
+  const importRe = new RegExp(`(?:from\\s+|require\\(|import\\()\\s*["'\`][^"'\`]*${escapeRegExp(baseNoExt)}(?:\\.[A-Za-z0-9]+)?["'\`]`);
   const execRe = new RegExp(`\\b(?:spawn|spawnSync|exec|execSync|execFile|execFileSync|runCommand)\\s*\\([^)]*["'\`][^"'\`]*${needle}["'\`]`);
   const linkRe = new RegExp(`\\]\\([^)]*(?:${needle}|${pathNeedle})\\)`);
   const readRe = new RegExp(`\\b(?:readFileSync|readFile)\\s*\\([^)]*["'\`][^"'\`]*${needle}["'\`]`);
@@ -238,8 +257,9 @@ function scanProject(ctx: HandlerContext, dir: string): { findings: Finding[]; e
       findings.push({ path, verdict: "keep", confidence: "high", pin: "append-only-record", evidence: "matches the append-only audit record allowlist — always exempt" });
       continue;
     }
-    if (isEcosystemPin(path)) {
-      findings.push({ path, verdict: "keep", confidence: "high", pin: "ecosystem-convention", evidence: "matches an ecosystem path convention (CI, Homebrew Formula, or a root agent/doc file)" });
+    const ecosystemReason = ecosystemPinReason(path);
+    if (ecosystemReason) {
+      findings.push({ path, verdict: "keep", confidence: "high", pin: "ecosystem-convention", evidence: `matches ${ecosystemReason}` });
       continue;
     }
     const content = files.get(path);
