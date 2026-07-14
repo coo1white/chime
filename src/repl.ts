@@ -31,7 +31,8 @@ Your tools:
 - repo_slim: read-only repo slim-down audit for one project. scan classifies every
   git-tracked file as keep (with a pin reason) or a rot-taxonomy delete/merge/review
   candidate with evidence and a confidence; plan groups high-confidence findings into
-  risk tiers and returns a planHash. It never writes to the project — only reports.
+  risk tiers and returns a planHash. rules needs no project — it returns a ready-to-
+  commit anti-regrowth rules snippet. It never writes to the project — only reports.
   Low-confidence findings are never a delete recommendation, only a review flag.
 
 How to act:

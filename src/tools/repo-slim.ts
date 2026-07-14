@@ -42,12 +42,37 @@ const NOT_IMPLEMENTED = [
 const inputSchema: JsonSchema = {
   type: "object",
   properties: {
-    action: { type: "string", enum: ["scan", "plan"], description: "scan is read-only file-by-file classification; plan groups scan's findings into risk tiers and returns a planHash over the exact batch" },
-    name: { type: "string", description: "project name from ~/.chime/projects.json" },
+    action: {
+      type: "string",
+      enum: ["scan", "plan", "rules"],
+      description: "scan is read-only file-by-file classification; plan groups scan's findings into risk tiers and returns a planHash over the exact batch; rules emits a ready-to-commit anti-regrowth rules snippet (no project needed)",
+    },
+    name: { type: "string", description: "project name from ~/.chime/projects.json — required for scan and plan, unused by rules" },
   },
-  required: ["action", "name"],
+  required: ["action"],
   additionalProperties: false,
 };
+
+// The four File Lifecycle rules plus the append-only exemption, as a ready-to-
+// commit markdown snippet for a target repo's agent rules file — pure data, no
+// logic, so a snapshot test is the only test this needs. One rule per rot-
+// taxonomy delete class (duplicate-doc-pair isn't here: merging two docs is a
+// one-time cleanup, not a standing rule against regrowth).
+const RULES_SNIPPET = `## File Lifecycle rules (repo_slim)
+
+- **Orphan tooling.** A script, helper, or fixture with no consumer — no import,
+  no CI step, no doc link, no spawn/exec reference — gets deleted, not kept
+  "just in case."
+- **Superseded drafts.** Once a draft's deliverable ships, the draft is deleted,
+  not archived alongside the shipped copy.
+- **Version-era snapshots.** A prompt, note, or "pending" list tied to a shipped
+  version is deleted once that version ships; it is not a permanent record.
+- **Stub copies.** A file whose content lives elsewhere is deleted — one source
+  and a link is the rule, not two copies of the same fact.
+- **Exemption: append-only records.** Audit logs, changelogs, and other
+  append-only records are never subject to the rules above; they are exempt by
+  design.
+`;
 
 function insideHome(path: string, home: string): boolean {
   const rel = relative(resolve(home), resolve(path));
@@ -301,7 +326,9 @@ function computePlanHash(tier1: Finding[], tier2: Finding[]): string {
 
 function handler(input: Record<string, unknown>, ctx: HandlerContext): ToolResultPayload {
   const action = String(input.action ?? "");
-  if (action !== "scan" && action !== "plan") return { ok: false, action, error: "action must be scan or plan" };
+  if (action !== "scan" && action !== "plan" && action !== "rules") return { ok: false, action, error: "action must be scan, plan, or rules" };
+
+  if (action === "rules") return { ok: true, action, snippet: RULES_SNIPPET };
 
   const name = typeof input.name === "string" ? input.name.trim() : "";
   if (!name) return { ok: false, action, error: "name is required" };
@@ -340,7 +367,7 @@ function handler(input: Record<string, unknown>, ctx: HandlerContext): ToolResul
 export const repoSlim: Capability = {
   name: "repo_slim",
   description:
-    "Read-only repo slim-down audit for one project (by name from ~/.chime/projects.json). action=scan walks the project's git-tracked files and classifies each one KEEP (with a pin reason — ecosystem convention, append-only record, import, spawn/exec, CI workflow step, package.json field, or doc link) or a rot-taxonomy candidate (delete: orphan tooling / superseded draft / version-era snapshot / stub-copy; merge: duplicate-doc-pair) with an evidence trail and a confidence. Two pin classes can't be fully verified by static grep (a content pin like readFileSync on the file; a runtime path convention) — files with only a soft signal for one of those come back verdict:review, confidence:low, never a blind delete. action=plan groups scan's high-confidence findings into risk tiers (tier1 delete-zero-consumer, tier2 merge-duplicates; tier3 stale-facts and tier4 history-purge are not implemented yet and are always empty) and returns a planHash over the exact batch. This tool never writes to the target project — its only output is the report. The target repo's own full test suite against the committed head is the final arbiter, not this scan.",
+    "Read-only repo slim-down audit for one project (by name from ~/.chime/projects.json). action=scan walks the project's git-tracked files and classifies each one KEEP (with a pin reason — ecosystem convention, append-only record, import, spawn/exec, CI workflow step, package.json field, or doc link) or a rot-taxonomy candidate (delete: orphan tooling / superseded draft / version-era snapshot / stub-copy; merge: duplicate-doc-pair) with an evidence trail and a confidence. Two pin classes can't be fully verified by static grep (a content pin like readFileSync on the file; a runtime path convention) — files with only a soft signal for one of those come back verdict:review, confidence:low, never a blind delete. action=plan groups scan's high-confidence findings into risk tiers (tier1 delete-zero-consumer, tier2 merge-duplicates; tier3 stale-facts and tier4 history-purge are not implemented yet and are always empty) and returns a planHash over the exact batch. action=rules needs no project — it returns a ready-to-commit markdown snippet of the four File Lifecycle rules (anti-regrowth) plus the append-only exemption, for pasting into the target repo's agent rules file. This tool never writes to the target project — its only output is the report. The target repo's own full test suite against the committed head is the final arbiter, not this scan.",
   inputSchema,
   handler,
 };
