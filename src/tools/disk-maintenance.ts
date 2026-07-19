@@ -132,7 +132,7 @@ function hasDangerSegment(path: string): boolean {
 }
 
 function defaultRoots(home: string): string[] {
-  return ["Downloads", "Desktop", "Documents", "gitea-backups"].map((p) => join(home, p));
+  return ["Downloads", "Desktop", "Documents", join("Developer", "ops", "gitea-backups")].map((p) => join(home, p));
 }
 
 function wantedTask(input: Record<string, unknown>): Task {
