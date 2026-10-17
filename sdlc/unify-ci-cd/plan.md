@@ -37,9 +37,8 @@ changed by this PR.
   `packageManager` field in `package.json`, no `bun.lock`,
   no `bunfig.toml`. The bun move for chime has **not** happened, and
   chime is not yet a row in `~/Developer/sdlc/unify-package-manager-
-  bun/spec.md` §4's per-project order table (checked: only whalewake,
-  cool-workflow, cool-english, cool-code-platform,
-  cool-tunnel-server are listed there).
+  bun/spec.md` §4's per-project order table (checked: five other
+  projects are listed there, chime is not).
 - No stack-gate / CI-shape test anywhere in `test/`. The `gate` hits
   found there (`project-check.test.ts`, `project-doctor.test.ts`,
   `repo-slim.test.ts`) are about chime's own product features (it is a
