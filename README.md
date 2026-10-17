@@ -6,7 +6,7 @@ Zero runtime dependencies — TypeScript on Node, the model APIs over native `fe
 (no SDK).
 
 Chime manages the Docker/Colima VM's disk (a front door to the
-[`colima-disk-maintenance`](../colima-disk-maintenance) launchd job, plus an
+`colima-disk-maintenance` launchd job (a separate, private repo), plus an
 opt-in deep Colima datadisk compactor) and acts as a
 **read-only secretary** over every project under `~/Developer` — it knows each repo,
 reports live git/version state, runs each repo's own fast check, and pings the
@@ -30,7 +30,7 @@ chime login                          # opens the Google popup; saves ~/.chime/co
 
 # B) an API key in the env
 export GEMINI_API_KEY=...            # Google Gemini  (default model gemini-2.5-flash)
-export ANTHROPIC_API_KEY=sk-ant-...  # Claude         (default model claude-opus-4-8)
+export ANTHROPIC_API_KEY=sk-ant-...  # Claude         (default model claude-sonnet-5-5)
 ```
 
 ```sh
@@ -224,13 +224,13 @@ Turn routing off with `CHIME_ROUTER=0` (then it always uses the balanced model).
 | `CHIME_VERTEX_PROJECT` / `_LOCATION` | from `chime login` / `us-central1` | Vertex AI project + region (no key; uses gcloud token) |
 | `CHIME_ROUTER` | on | `0` to disable per-turn routing (always use balanced) |
 | `CHIME_TIER_CHEAP` / `_BALANCED` / `_STRONG` | per-backend | override a tier's model id |
-| `CHIME_MODEL` | per-backend | the balanced/default model (gemini `gemini-2.5-flash` / claude `claude-sonnet-5`) |
+| `CHIME_MODEL` | per-backend | the balanced/default model (gemini `gemini-2.5-flash` / claude `claude-sonnet-5-5`) |
 | `CHIME_MAX_TOKENS` | `2048` | max reply tokens |
 | `CHIME_MAX_ITERATIONS` | `8` | tool-call rounds per turn (loop guard) |
 | `CHIME_HANDOFF_DIR` | from `~/.chime/config.json` `handoffDir` | default shared ledger dir for `ledger list` when no `dir` is given |
 
 Default tiers — gemini: `gemini-2.5-flash-lite` / `gemini-2.5-flash` / `gemini-2.5-pro`;
-claude: `claude-haiku-4-5` / `claude-sonnet-5` / `claude-opus-4-8`.
+claude: `claude-haiku-5-5` / `claude-sonnet-5-5` / `claude-opus-5-5`.
 
 **Backend precedence**: `CHIME_BACKEND` (explicit) > a **saved `chime login`** (pins
 the backend) > a present API key. So once you `chime login` (Vertex), a stray
