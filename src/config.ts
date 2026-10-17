@@ -119,7 +119,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   const geminiLike = backend === "gemini" || backend === "vertex";
   const tierDefaults = geminiLike
     ? { cheap: "gemini-2.5-flash-lite", balanced: "gemini-2.5-flash", strong: "gemini-2.5-pro" }
-    : { cheap: "claude-haiku-4-5", balanced: "claude-sonnet-5", strong: "claude-opus-4-8" };
+    : { cheap: "claude-haiku-5-5", balanced: "claude-sonnet-5-5", strong: "claude-opus-5-5" };
   const tiers: Tiers = {
     cheap: env.CHIME_TIER_CHEAP || tierDefaults.cheap,
     balanced: env.CHIME_TIER_BALANCED || env.CHIME_MODEL || tierDefaults.balanced,

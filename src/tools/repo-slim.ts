@@ -140,7 +140,7 @@ interface PinMatch {
 // argument, a CI workflow step, a package.json field, or a markdown link — any
 // one of these is a real, checkable dependency, so the first one found short-
 // circuits the search. A readFileSync/readFile-style mention is the softer
-// "content pin" TODO.md calls out by name: it looks like a reference but a
+// "content pin": it looks like a reference but a
 // dynamic path could just as easily be coincidence, so it only ever downgrades
 // confidence, never produces a hard keep on its own.
 function findPin(target: string, files: Map<string, string>): PinMatch | undefined {

@@ -134,7 +134,7 @@ test("scan keeps a root agent doc and a CI-referenced file without flagging them
 
 // A fixture test elsewhere in the repo reads this file via readFileSync, but
 // nothing imports/requires it, links to it, or execs it — the one pin class
-// TODO.md calls out as not fully verifiable by static grep. Must come back
+// static grep cannot fully verify. Must come back
 // low confidence and "review", never a confident "delete".
 test("scan downgrades a content-pinned fixture file to low confidence instead of delete", async () => {
   const { home, repo } = tempHome();

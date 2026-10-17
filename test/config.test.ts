@@ -29,8 +29,8 @@ test("ANTHROPIC_API_KEY → anthropic backend + claude tiers (default model = ba
   const c = cfg({ ANTHROPIC_API_KEY: "sk-ant" });
   assert.equal(c.backend, "anthropic");
   assert.equal(c.apiKey, "sk-ant");
-  assert.deepEqual(c.tiers, { cheap: "claude-haiku-4-5", balanced: "claude-sonnet-5", strong: "claude-opus-4-8" });
-  assert.equal(c.model, "claude-sonnet-5");
+  assert.deepEqual(c.tiers, { cheap: "claude-haiku-5-5", balanced: "claude-sonnet-5-5", strong: "claude-opus-5-5" });
+  assert.equal(c.model, "claude-sonnet-5-5");
   assert.equal(c.router, true);
   assert.equal(c.anthropicVersion, "2023-06-01");
 });

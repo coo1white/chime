@@ -3,6 +3,19 @@
 All notable changes to Chime are noted here. Versions are small on purpose —
 one capability per step, slow and steady.
 
+## Unreleased
+
+Housekeeping for the public repo.
+
+- **Models**: the Claude tier defaults move to the current generation —
+  `claude-haiku-5-5` / `claude-sonnet-5-5` / `claude-opus-5-5` (were
+  `claude-haiku-4-5` / `claude-sonnet-5` / `claude-opus-4-8`). The README said the
+  Claude default was the strong model; it is the balanced one, and now says so.
+  `CHIME_TIER_*` and `CHIME_MODEL` still override every tier.
+- **Backlog**: `TODO.md` is gone; it was empty. New work is tracked in GitHub issues.
+- **README**: the `colima-disk-maintenance` link pointed at a private sibling repo
+  (a 404 for everyone else); it is plain text now.
+
 ## 0.0.4
 
 `ledger list` finds your inbox — a configured default directory.
